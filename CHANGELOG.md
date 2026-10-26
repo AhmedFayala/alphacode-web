@@ -3,6 +3,31 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is SemVer.
 
+## [1.0.1] - 2026-10-26
+
+### Fixed
+- **Installer self-recursion**: the `as_user` fallback helper's sudo branch called itself
+  instead of `sudo -u`, recursing unboundedly through sudo→bash on every host with sudo
+  installed (observed as a bash segfault during the binary-setup phase). Root cause of the
+  reported "segfault on modern kernels"; the kernel version was not a factor.
+- **Nested upstream installer removed**: AlphaCode is no longer installed by piping
+  upstream scripts through `su`/`runuser` subshells.
+- **Blind re-install**: the installer now detects and adopts a healthy pre-existing
+  `alphacode` from `PATH`, `/usr/local/bin`, `/usr/bin`, `/opt/alphacode/bin`, or the
+  invoking user's `~/.local/bin` instead of overwriting it.
+- **Unit-template leakage**: `systemd/` templates shipped raw `__USER__`-style
+  placeholders; `install.sh` now validates that no placeholder (`__X__` or `{{x}}`)
+  survives substitution and that every unit carries `UMask=0077` before writing to
+  `/etc/systemd/system/`, and asserts the venv interpreter exists first.
+
+### Added
+- `install.sh --verify` — end-to-end sanity check (services, binary version, `/healthz`,
+  harness socket handshake) printing the access URL on success.
+- Direct archive ingestion: on a clean host the installer downloads the release tarball
+  for the detected architecture (x86_64/aarch64) with `curl` or `wget` and verifies
+  SHA-256 against the release `SHA256SUMS`.
+- Adoption provenance marker at `~/.alphacode/.adopted_from`.
+
 ## [1.0.0] - 2026-10-26
 
 First public release.

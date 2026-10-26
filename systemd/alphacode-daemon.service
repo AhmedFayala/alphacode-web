@@ -1,3 +1,6 @@
+# TEMPLATE — do NOT install directly.
+# install.sh embeds this unit, substitutes __USER__/__HOME__/__WEB__/__VENV__/__WEBCONF__,
+# validates that no placeholder survived, then writes the real unit to /etc/systemd/system/.
 [Unit]
 Description=AlphaCode AI Agent Daemon
 After=network.target

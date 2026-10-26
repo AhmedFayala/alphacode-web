@@ -55,6 +55,7 @@ REPO_SLUG="${ALPHACODE_WEB_REPO:-AhmedFayala/alphacode-web}"
 REF="${ALPHACODE_WEB_REF:-main}"
 FORCE="no"
 DO_UNINSTALL="no"
+DO_VERIFY="no"
 PROVIDER_NAME=""
 BASE_URL=""
 MODEL=""
@@ -72,11 +73,34 @@ die()  { printf '%s\n' "${C_RED}  ✗ $*${C_RESET}" >&2; exit 1; }
 # (util-linux) then su, so the installer also works on minimal images without sudo.
 as_user() {
   if command -v sudo >/dev/null 2>&1; then
-    as_user "$@"
+    sudo -u "$ALPHACODE_USER" "$@"
   elif command -v runuser >/dev/null 2>&1; then
     runuser -u "$ALPHACODE_USER" -- "$@"
   else
-    su -s /bin/bash "$ALPHACODE_USER" -c "$(printf '%q ' "$@")"
+    # No sudo/runuser: stage a root-owned script and su into it. Never nest a
+    # piped subshell inside su -c; that is the fragile path this installer avoids.
+    local script rc
+    script="$(mktemp /tmp/alphacode-asuser.XXXXXX.sh)"
+    {
+      printf '%q ' "$@"
+      printf '\nexit $?\n'
+    } > "$script"
+    chmod 755 "$script"
+    su -s /bin/bash "$ALPHACODE_USER" -c "$script"
+    rc=$?
+    rm -f "$script"
+    return $rc
+  fi
+}
+
+# Fetch a URL with whatever downloader exists (curl preferred, wget fallback).
+dl() {  # $1 = url, $2 = destination
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --max-time 240 -o "$2" "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --tries=3 --timeout=90 -O "$2" "$1"
+  else
+    return 1
   fi
 }
 
@@ -99,7 +123,8 @@ Options:
   --model <MODEL>          Model id for that profile              (optional)
   --api-key <KEY>          API key (or env ALPHACODE_API_KEY)     (optional)
   --force                  Reinstall the binary / overwrite configs
-  --uninstall              Remove services, files and user
+  --verify                 End-to-end sanity check (services, HTTP, harness socket)
+  --uninstall              Remove created services/files/user; never host binaries/packages
   -h|--help                Show this help
 
 Modes:
@@ -128,6 +153,7 @@ while [[ $# -gt 0 ]]; do
     --model)         MODEL="${2:-}"; shift 2 ;;
     --api-key)       API_KEY="${2:-}"; shift 2 ;;
     --force)         FORCE="yes"; shift ;;
+    --verify)        DO_VERIFY="yes"; shift ;;
     --uninstall)     DO_UNINSTALL="yes"; shift ;;
     -h|--help)       usage ;;
     *) die "unknown option: $1 (try --help)" ;;
@@ -140,6 +166,44 @@ case "$MODE" in
 esac
 [[ "$PORT" =~ ^[0-9]+$ ]] || die "--port must be numeric"
 [[ "$(id -u)" -eq 0 ]] || die "run as root (sudo bash $0)"
+
+# ── --verify: end-to-end sanity check ──────────────────────────────────────
+if [[ "$DO_VERIFY" == "yes" ]]; then
+  fail=0
+  echo "AlphaCode deployment verification"
+  echo "  --- services ---"
+  for svc in alphacode-daemon alphacode-api-bridge alphacode-web; do
+    st="$(systemctl is-active "$svc.service" 2>/dev/null || true)"
+    printf '  %-24s %s\n' "$svc" "$st"
+    [[ "$st" == "active" ]] || fail=1
+  done
+  echo "  --- binary ---"
+  BV="$("$ALPHACODE_HOME/.local/bin/alphacode" --version 2>/dev/null || echo missing)"
+  printf '  %-24s %s\n' "alphacode" "$BV"
+  [[ "$BV" != "missing" ]] || fail=1
+  echo "  --- bridge ---"
+  VPORT="$(grep -oP '^BRIDGE_PORT=\K.*' "$WEB_CONF" 2>/dev/null || echo "${PORT}")"
+  VCODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${VPORT}/healthz" 2>/dev/null || echo 000)"
+  printf '  %-24s %s\n' "/healthz" "$VCODE"
+  [[ "$VCODE" == "200" ]] || fail=1
+  echo "  --- harness socket ---"
+  if command -v sudo >/dev/null 2>&1; then
+    hs="$(sudo -u "$ALPHACODE_USER" python3 "${ALPHACODE_HOME}/web/harness_probe.py" 2>&1 | tail -1)"
+  else
+    hs="$(runuser -u "$ALPHACODE_USER" -- python3 "${ALPHACODE_HOME}/web/harness_probe.py" 2>&1 | tail -1)"
+  fi
+  printf '  %-24s %s\n' "alphacode-api.sock" "$hs"
+  [[ "$hs" == "hello_ok" ]] || fail=1
+  echo
+  if [[ $fail -eq 0 ]]; then
+    echo "RESULT: healthy"
+    TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null || true)"
+    [[ -n "$TOKEN" ]] && printf 'Access URL: http://127.0.0.1:%s/?token=%s\n' "$VPORT" "$TOKEN"
+    exit 0
+  fi
+  echo "RESULT: problems detected (see above)"
+  exit 1
+fi
 
 # ── Uninstall ───────────────────────────────────────────────────────────────
 if [[ "$DO_UNINSTALL" == "yes" ]]; then
@@ -156,7 +220,8 @@ if [[ "$DO_UNINSTALL" == "yes" ]]; then
   if id -u "$ALPHACODE_USER" >/dev/null 2>&1; then
     userdel -r "$ALPHACODE_USER" 2>/dev/null || warn "could not remove user home"
   fi
-  ok "uninstalled (cloudflared and apt packages left in place)"
+  ok "uninstalled"
+  ok "left untouched: host binaries (/usr/local/bin, /usr/bin), apt packages, cloudflared"
   exit 0
 fi
 
@@ -209,21 +274,75 @@ install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" -m 700 "$CONFIG_DIR"
 # ── 3. AlphaCode binary ─────────────────────────────────────────────────────
 BIN="${ALPHACODE_HOME}/.local/bin/alphacode"
 log "Installing AlphaCode ${VERSION}"
-INSTALLED_VER=""
-[[ -x "$BIN" ]] && INSTALLED_VER="$("$BIN" --version 2>/dev/null || true)"
-if [[ "$FORCE" == "no" && "$INSTALLED_VER" == *"${VERSION#v}"* ]]; then
-  ok "already at $INSTALLED_VER"
+
+# A candidate is healthy iff it executes and reports a version.
+binary_healthy() {
+  [[ -x "$1" ]] || return 1
+  "$1" --version >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# Search PATH and standard locations for a system AlphaCode we can adopt.
+find_existing_binary() {
+  local cand invoker_home
+  invoker_home="$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6 || true)"
+  for cand in \
+      "$(command -v alphacode 2>/dev/null || true)" \
+      /usr/local/bin/alphacode \
+      /usr/bin/alphacode \
+      /opt/alphacode/bin/alphacode \
+      "${invoker_home:+${invoker_home}/.local/bin/alphacode}" \
+      "$BIN"; do
+    [[ -n "$cand" && "$cand" != "$BIN" ]] || continue
+    if binary_healthy "$cand"; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ "$FORCE" == "no" ]] && binary_healthy "$BIN"; then
+  ok "already at $("$BIN" --version 2>/dev/null || echo "$VERSION")"
 else
-  # Run from the user's home: the upstream installer uses cwd during extraction
-  # and fails silently when it cannot traverse there.
-  as_user bash -c "
-    cd \"\$HOME\"
-    curl -fsSL https://raw.githubusercontent.com/dragonked2/alphacode/main/scripts/install.sh \
-      | bash -s -- --version '${VERSION}'
-  " || die "AlphaCode install failed"
-  [[ -x "$BIN" ]] || die "binary missing at $BIN after install"
-  ok "installed $("$BIN" --version 2>/dev/null || echo "$VERSION")"
+  ADOPT_SRC="$(find_existing_binary || true)"
+  if [[ -n "$ADOPT_SRC" ]]; then
+    # ── Adoption: reuse the healthy system binary; never re-download ──
+    install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" "$(dirname "$BIN")"
+    install -m 755 -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" "$ADOPT_SRC" "$BIN"
+    printf '%s\n' "$ADOPT_SRC" > "${RUNTIME_DIR}/.adopted_from" 2>/dev/null || true
+    chown "$ALPHACODE_USER:$ALPHACODE_USER" "${RUNTIME_DIR}/.adopted_from" 2>/dev/null || true
+    ok "Detected existing working AlphaCode: ${ADOPT_SRC}"
+    ok "adopted -> ${BIN} ($("$BIN" --version 2>/dev/null || echo "?"))"
+  else
+    # ── Direct archive ingestion: release tarball + SHA-256, no upstream pipe ──
+    install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" "$(dirname "$BIN")"
+    case "$(uname -m)" in
+      x86_64|amd64)  ASSET="alphacode-linux-x86_64.tar.gz" ;;
+      aarch64|arm64) ASSET="alphacode-linux-arm64.tar.gz" ;;
+      *) die "unsupported architecture: $(uname -m) (need x86_64 or aarch64)" ;;
+    esac
+    REL_URL="https://github.com/dragonked2/alphacode/releases/download/${VERSION}"
+    TMPD="$(mktemp -d /tmp/alphacode-dl.XXXXXX)"
+    log "Downloading ${ASSET} (${VERSION})"
+    dl "${REL_URL}/${ASSET}"   "${TMPD}/${ASSET}"   || { rm -rf "$TMPD"; die "release archive download failed"; }
+    dl "${REL_URL}/SHA256SUMS" "${TMPD}/SHA256SUMS" || { rm -rf "$TMPD"; die "checksum list download failed"; }
+    EXPECTED="$(grep -E "[[:space:]]${ASSET}\$" "${TMPD}/SHA256SUMS" | awk '{print $1}' | head -1)"
+    [[ -n "$EXPECTED" ]] || { rm -rf "$TMPD"; die "no checksum entry for ${ASSET} in SHA256SUMS"; }
+    printf '%s  %s\n' "$EXPECTED" "${TMPD}/${ASSET}" | sha256sum -c - >/dev/null 2>&1 \
+      || { rm -rf "$TMPD"; die "SHA-256 verification failed for ${ASSET} — aborting"; }
+    ok "checksum verified"
+    tar -xzf "${TMPD}/${ASSET}" -C "$TMPD"
+    NEWBIN="$(find "$TMPD" -maxdepth 3 -type f -name alphacode | head -1)"
+    [[ -n "$NEWBIN" ]] || { rm -rf "$TMPD"; die "archive did not contain an alphacode binary"; }
+    install -m 755 -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" "$NEWBIN" "$BIN"
+    rm -rf "$TMPD"
+    ok "installed ${VERSION} from release archive (no upstream scripts executed)"
+  fi
 fi
+
+binary_healthy "$BIN" || die "binary at $BIN is not healthy after install"
+ok "AlphaCode ready: $("$BIN" --version 2>/dev/null || echo "$VERSION")"
 
 # ── 4. Config (telemetry off) ───────────────────────────────────────────────
 if [[ ! -f "$CONFIG_TOML" || "$FORCE" == "yes" ]]; then
@@ -458,12 +577,28 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+# Deterministic units: the venv interpreter must exist before we reference it,
+# and every template placeholder must be gone before systemd ever sees the file.
+[[ -x "${VENV_DIR}/bin/python" ]] \
+  || die "venv interpreter missing at ${VENV_DIR}/bin/python (did venv setup run?)"
 sed -i "s|__USER__|${ALPHACODE_USER}|g; s|__HOME__|${ALPHACODE_HOME}|g; \
         s|__WEB__|${WEB_DIR}|g; s|__VENV__|${VENV_DIR}|g; \
         s|__WEBCONF__|${WEB_CONF}|g" \
   /etc/systemd/system/alphacode-daemon.service \
   /etc/systemd/system/alphacode-api-bridge.service \
   /etc/systemd/system/alphacode-web.service
+
+for unit in /etc/systemd/system/alphacode-daemon.service \
+            /etc/systemd/system/alphacode-api-bridge.service \
+            /etc/systemd/system/alphacode-web.service; do
+  if grep -Eq '__[A-Z_]+__|\{\{[A-Za-z_]+\}\}' "$unit"; then
+    LEFTOVER="$(grep -Eo '__[A-Z_]+__|\{\{[A-Za-z_]+\}\}' "$unit" | tr '\n' ' ')"
+    die "unsubstituted template placeholder(s) in $unit: $LEFTOVER — refusing to install a unit systemd would reject"
+  fi
+  grep -q '^UMask=0077$' "$unit" \
+    || die "$unit is missing UMask=0077 (required for 0600 socket creation)"
+done
+ok "units substituted and validated (no template placeholders, UMask=0077 present)"
 
 # Quick-tunnel unit (only in quick-tunnel mode; removed otherwise)
 if [[ "$MODE" == "quick-tunnel" ]]; then

@@ -49,8 +49,14 @@ AlphaCode web chat
 Open it from any device on the same network — or pick an exposure mode below.
 
 > **Requirements:** any Debian/Ubuntu host (bare metal, VPS, VM, WSL2) with root or sudo.
-> Everything else is handled: user provisioning, binary install with SHA-256 verification,
-> Python venv, systemd units, token generation.
+> Everything else is handled: user provisioning, Python venv, systemd units, token generation.
+>
+> **Binary handling — adoption first.** The installer looks for an existing healthy
+> `alphacode` (`PATH`, `/usr/local/bin`, `/usr/bin`, `/opt/alphacode/bin`, the invoking
+> user's `~/.local/bin`). If it finds one it validates `alphacode --version` and adopts it —
+> **no download, no overwrite of your system binary**. Otherwise it downloads the release
+> tarball directly, verifies SHA-256 against the published `SHA256SUMS`, and extracts the
+> binary itself. Upstream `curl | bash` installers are never executed.
 
 ---
 
@@ -159,13 +165,14 @@ Telemetry is disabled twice over: `telemetry = "nothing"` in config **and**
 systemctl status alphacode-daemon alphacode-api-bridge alphacode-web
 journalctl -u alphacode-web -f          # bridge logs
 alphacode-verify                        # full health check
+sudo bash install.sh --verify           # same checks as an installer subcommand
 alphacode-web                           # print the current access URL
 
 # regenerate the bearer token
 openssl rand -hex 32 > ~/.alphacode/web_token && chmod 600 ~/.alphacode/web_token
 systemctl restart alphacode-web
 
-# upgrade AlphaCode itself
+# upgrade AlphaCode itself (host binary owners: upgrade there, re-run installer to re-adopt)
 sudo -u alphacode-runner ~/.local/bin/alphacode update
 ```
 
@@ -178,6 +185,8 @@ sudo -u alphacode-runner ~/.local/bin/alphacode update
 | `daemon not available` on connect | `systemctl restart alphacode-daemon` (the api-bridge follows via `Requires=`) |
 | Model never responds | the free lane may be down in your region — attach a provider with `--base-url/--model/--api-key` |
 | Quick-tunnel returns Cloudflare's empty 404 | run with `--config /dev/null` so the named-tunnel ingress is not inherited (fixed in `install.sh`) |
+| `bad unit file setting` on daemon-reload | fixed in v1.0.1: units are validated for leftover template placeholders and for `UMask=0077` before install |
+| installer hangs/segfaults during binary setup | fixed in v1.0.1: removed recursive `as_user` fallback and nested upstream `curl \| bash`; release archive is ingested directly |
 
 ## Credits
 
