@@ -3,6 +3,49 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is SemVer.
 
+## [1.1.0] - 2026-10-26
+
+### Added
+- **Engine parity in the Web UI** (deep integration with the AlphaCode daemon):
+  - **Model & provider switcher** — click the model pill to open a searchable modal fed
+    live by the daemon's model catalog (`get_model_catalog`): every route with its
+    provider, API method, availability, and price hints; unavailable routes grouped with
+    the daemon's own reason ("no credentials", ...). Switching issues `set_model` and
+    confirms on the daemon's `model_changed` event.
+  - **Reasoning-effort selector** — none / low / medium / high pill backed by
+    `set_reasoning_effort` (`reasoning_effort_changed` confirmation).
+  - **Engine inspector** — one panel with session state (`state`: message count,
+    processing flag), live token telemetry, catalog stats, environment inventory
+    (workspace, config settings, provider profile NAMES — credentials are never read),
+    and the tools observed this session with call counts, statuses and durations.
+  - **Session rename & archive** from the UI (`rename_session`); archive renames to
+    `archived · <title>`. Rename buttons also live on sidebar items.
+  - **Live token counters** — input/output/cache totals from the daemon's token stream,
+    shown next to the context meter.
+  - **Tool timing** — per-call duration in the tool badge (`done · 0.3s`).
+- **Installer CLI visual overhaul** (`install.sh`):
+  - Width-true bordered cards: fixed 60-column interior, left AND right borders on every
+    row, values truncated to fit, ANSI-escape-aware padding — identical geometry in the
+    ASCII fallback. No more broken pipes or stray boundary glyphs on Windows Terminal,
+    Termius or mobile SSH clients.
+  - Deeper system profiling: CPU model + architecture + thread count, memory
+    used/total, root-disk device with capacity and free space.
+  - Quick-tunnel finale now also shows the Direct-IP alternative with the detected
+    server IP, so both access paths are visible in every mode.
+  - Removed the locale-fragile emoji from progress output; all card row text is ASCII
+    by construction.
+
+### Fixed
+- **Bridge stream limit**: the model-catalog reply is a single NDJSON line far beyond
+  asyncio's 64 KiB default; the engine read loop died on first catalog fetch ("Separator
+  is found, but chunk is longer than limit") and closed the client socket. Both socket
+  readers now run with a 16 MiB limit.
+- Engine reply matching: `model_changed` / `session_renamed` are both daemon replies and
+  unsolicited pushes — reply matching now takes precedence over push mirroring, and the
+  rename paths update the sidebar immediately instead of waiting for the next poll.
+- `scripts/deploy_alphacode.sh` (offline variant) regenerated with the new bridge + UI;
+  embedded copies verified byte-identical to `src/`.
+
 ## [1.0.2] - 2026-10-26
 
 ### Added

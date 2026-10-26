@@ -29,6 +29,7 @@ VERIFY_HELPER="/usr/local/bin/alphacode-verify"
 MODE="loopback"
 PORT="8765"
 VERSION="v1.0.89"
+INSTALLER_VER="v1.0.3"
 REPO_SLUG="${ALPHACODE_WEB_REPO:-AhmedFayala/alphacode-web}"
 REF="${ALPHACODE_WEB_REF:-main}"
 FORCE="no"
@@ -60,7 +61,7 @@ if (( TTY )); then
 fi
 if (( TTY && UTF8 )); then
   TL=$'\xe2\x95\xad'; TR=$'\xe2\x95\xae'; BL=$'\xe2\x95\xb0'; BR=$'\xe2\x95\xbf'
-  HZ=$'\xe2\x94\x80'; VT=$'\xe2\x95\xa2'
+  HZ=$'\xe2\x94\x80'; VT=$'\xe2\x94\x82'
 else
   TL="+"; TR="+"; BL="+"; BR="+"; HZ="-"; VT="|"
 fi
@@ -119,19 +120,48 @@ spin_stop() {
   return 0
 }
 
-# Bordered card with fixed-width rows (values truncated to fit).
-card() { # card "TITLE" ; then card_line label value pairs ; card_close
-  printf '%b\n' "${SLATE}${TL}${HZ}${HZ}${HZ}${TR}${R}"
-  printf '%b\n' "${SLATE}${VT}${R} ${B}$1${R}"
-  printf '%b\n' "${SLATE}${VT}${R}"
+# ── Bordered card engine: fixed-width, cross-terminal geometry ──────────────
+# One geometry for every card: CARD_W interior columns, a left AND right border
+# on every row, values truncated to fit. Unicode borders require a UTF-8
+# charset (hard-coded byte escapes — locale-independent); the ASCII fallback
+# keeps the exact same column geometry, so nothing can misalign. Card row text
+# is kept pure ASCII by construction: glyphs appear only in the border runes,
+# which sit outside any width computation.
+CARD_W=60   # interior columns between the two border glyphs
+
+_sp() { printf '%*s' "$1" ''; }
+_hzrun() { # $1 count — a run of HZ
+  local s; s="$(_sp "$1")"; printf '%s' "${s// /$HZ}"
 }
-card_line() { # $1 label, $2 value
-  local label="$1" val="$2" maxv=44
-  ((${#val} > maxv)) && val="${val:0:$((maxv - 1))}…"
-  printf '%b\n' "${SLATE}${VT}${R}  ${GRAY}$(printf '%-11s' "$label")${R}${val}"
+_hborder() { # $1 = left corner, $2 = right corner
+  printf '%b\n' "${SLATE}$1$(_hzrun "$CARD_W")$2${R}"
+}
+# $1 = visible length of the interior text, $2 = the (possibly colored) text.
+# Width math uses only the plain length — ANSI SGR bytes never count.
+_crow_n() { # $1 = visible width, $2 = colored text
+  local n="$1" text="$2" pad
+  pad=$(( CARD_W - 1 - n )); (( pad < 0 )) && pad=0
+  printf '%b\n' "${SLATE}${VT}${R} ${text}$(_sp "$pad")${SLATE}${VT}${R}"
+}
+_crow() { # $1 = plain uncolored interior text
+  _crow_n "${#1}" "$1"
+}
+card() { # card "TITLE" — opens a bordered card
+  _hborder "$TL" "$TR"
+  local title="$1" w padl
+  w=$(( ${#title} ))
+  padl=$(( (CARD_W - 1 - w) / 2 )); (( padl < 0 )) && padl=0
+  _crow_n $(( padl + w )) "$(_sp "$padl")${B}${VIOLET}${title}${R}"
+  _crow ""
+}
+card_line() { # $1 label (<=11 chars), $2 value — auto-truncated to fit
+  local label="$1" val="$2"
+  local maxv=$(( CARD_W - 1 - 11 - 1 ))   # 1 gutter + 11 label + 1 gap
+  ((${#val} > maxv)) && val="${val:0:$((maxv - 3))}…"
+  _crow_n $(( 11 + ${#val} )) "${GRAY}$(printf '%-11s' "$label")${R}${val}"
 }
 card_close() {
-  printf '%b\n' "${SLATE}${BL}${HZ}${HZ}${HZ}${BR}${R}"
+  _hborder "$BL" "$BR"
 }
 
 # Clickable terminal hyperlink (OSC 8); falls back to plain text.
@@ -396,9 +426,10 @@ find_existing_binary() {
 #  Banner
 # ════════════════════════════════════════════════════════════════════════════
 printf '\n'
-printf '%b\n' "${SLATE}${TL}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${TR}${R}"
-printf '%b\n' "${SLATE}${VT}${R}  ${B}${VIOLET}◈ AlphaCode Web${R} ${B}— installer${R}   ${GRAY}installer v1.0.2 · agent ${VERSION}${R}  ${SLATE}${VT}${R}"
-printf '%b\n' "${SLATE}${BL}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${BR}${R}"
+card "AlphaCode Web Installer"
+card_line "version"  "installer ${INSTALLER_VER} | agent ${VERSION}"
+card_line "command"  "one-line curl | bash | idempotent"
+card_close
 
 # ════════════════════════════════════════════════════════════════════════════
 #  [1/6] System Profiling
@@ -411,27 +442,32 @@ OS_PRETTY="${OS_PRETTY:-unknown}"
 KERNEL="$(uname -r)"
 ARCH="$(uname -m)"
 CORES="$(nproc 2>/dev/null || echo '?')"
-MEM_TOTAL="$(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo 2>/dev/null || echo '?')"
-MEM_AVAIL="$(awk '/MemAvailable/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo 2>/dev/null || echo '?')"
+CPU_MODEL="$(awk -F': ' '/model name|Model/ {print $2; exit}' /proc/cpuinfo 2>/dev/null | sed 's/ *$//')"
+CPU_MODEL="${CPU_MODEL:-${ARCH}}"
+MEM_TOTAL_KB="$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+MEM_AVAIL_KB="$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+MEM_TOTAL="$(awk -v k="$MEM_TOTAL_KB" 'BEGIN {printf "%.1f GiB", k/1048576}')"
+MEM_USED="$(awk -v t="$MEM_TOTAL_KB" -v a="$MEM_AVAIL_KB" 'BEGIN {printf "%.1f GiB", (t-a)/1048576}')"
+DISK_SRC="$(df -Pk / 2>/dev/null | awk 'NR==2 {print $1}')"
 read -r DISK_TOTAL DISK_AVAIL <<<"$(df -Pk / 2>/dev/null | awk 'NR==2 {printf "%d %d", $2/1048576, $4/1048576}')"
 PY_VER="$(python3 --version 2>/dev/null | awk '{print $2}')"
 
-DETECT="not found — clean install"
+DETECT="not found (clean install)"
 DETECT_SRC="$(detect_any_binary | head -1 || true)"
 if [[ -n "${DETECT_SRC:-}" ]]; then
-  DETECT="${DETECT_SRC} — will adopt ($("${DETECT_SRC}" --version 2>/dev/null | head -1))"
+  DETECT="${DETECT_SRC} => will adopt ($("${DETECT_SRC}" --version 2>/dev/null | head -1))"
 fi
 
 card "System Profile"
 card_line "hostname"  "$HOSTN"
 card_line "os"        "$OS_PRETTY"
 card_line "kernel"    "$KERNEL"
-card_line "cpu"       "${ARCH} · ${CORES} cores"
-card_line "memory"    "${MEM_TOTAL:-?} total · ${MEM_AVAIL:-?} available"
-card_line "disk /"    "${DISK_AVAIL:-?} GiB free of ${DISK_TOTAL:-?} GiB"
+card_line "cpu"       "${CPU_MODEL} (${ARCH}, ${CORES} threads)"
+card_line "memory"    "used ${MEM_USED:-?} / total ${MEM_TOTAL:-?}"
+card_line "disk /"    "${DISK_SRC:-?}: ${DISK_AVAIL:-?} GiB free of ${DISK_TOTAL:-?} GiB"
 card_line "python"    "${PY_VER:-not present (installed in step 4)}"
 card_line "alphacode" "$DETECT"
-card_line "mode"      "$MODE · port ${PORT}"
+card_line "mode"      "$MODE, port ${PORT}"
 card_close
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -870,7 +906,7 @@ if [[ "$MODE" == "quick-tunnel" ]]; then
     [[ -n "$TUNNEL_URL" ]] && break
     elapsed=$(( 12 - (deadline - $(date +%s)) ))
     if (( TTY )); then
-      printf '\r    %s⏳%s registering tunnel… %ds elapsed \e[K' "$YEL" "$R" "$elapsed"
+      printf '\r    %sregistering tunnel… %ds elapsed\e[K' "$YEL" "$elapsed"
       (( $(date +%s) >= deadline )) && { printf '\n'; break; }
       sleep 0.5
     else
@@ -994,14 +1030,19 @@ else
 fi
 
 printf '\n'
-card "✔  AlphaCode Web is live"
+card "AlphaCode Web is live"
 card_line "services"  "${SERVICES_LINE:-active active active}"
 card_line "mode"      "$MODE_DESC"
-card_line "bridge"    "127.0.0.1:${PORT} · 0600 sockets (UMask 0077)"
-card_line "user"      "${ALPHACODE_USER} (unprivileged, sandboxed)"
+card_line "bridge"    "127.0.0.1:${PORT} | 0600 sockets (UMask 0077)"
+card_line "user"      "${ALPHACODE_USER} (unprivileged)"
 card_close
 printf '\n  %bOpen your workspace:%b\n\n' "$B" "$R"
 printf '  '; link "$URL" "$URL"
+if [[ "$MODE" == "quick-tunnel" ]]; then
+  IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}' | head -1)"
+  printf '\n  %bdirect-ip alternative:%b rerun with --mode direct-ip to expose\n' "$B" "$R"
+  printf '  %bhttp://%s:%s/?token=<TOKEN> over plain HTTP (LAN/public).%b\n' "$GRAY" "${IP:-<SERVER_IP>}" "$PORT" "$R"
+fi
 printf '\n  %bmanage:%b    alphacode-web      print this summary\n' "$GRAY" "$R"
 printf '  %b            alphacode-verify   health check\n' "$GRAY"
 if [[ "$MODE" == "quick-tunnel" ]]; then
