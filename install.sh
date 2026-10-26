@@ -252,6 +252,28 @@ fetch_raw "src/bridge.py"        "${WEB_DIR}/bridge.py"        600
 fetch_raw "src/static/index.html" "${STATIC_DIR}/index.html"   644
 ok "bridge.py + index.html deployed"
 
+cat > "${WEB_DIR}/harness_probe.py" <<'PROBE_PY'
+#!/usr/bin/env python3
+"""Minimal harness API handshake probe (used by alphacode-verify)."""
+import json, os, socket
+
+path = os.path.join(os.path.expanduser("~"), ".alphacode", "alphacode-api.sock")
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(path)
+    req = {"id": 1, "req": "hello", "min_version": 1,
+           "max_version": 1, "client": "verify"}
+    s.sendall((json.dumps(req) + "\n").encode())
+    line = s.makefile().readline()
+    print("hello_ok" if line and "hello_ok" in line else "unexpected: " + (line or "").strip())
+except Exception as exc:
+    print("unreachable: " + str(exc))
+PROBE_PY
+chown -R "$ALPHACODE_USER:$ALPHACODE_USER" "$WEB_DIR"
+chmod 600 "${WEB_DIR}/bridge.py"
+chmod 644 "${STATIC_DIR}/index.html"
+
 # ── 6. Python venv with websockets ──────────────────────────────────────────
 if [[ ! -x "${VENV_DIR}/bin/python" || "$FORCE" == "yes" ]]; then
   as_user python3 -m venv "$VENV_DIR"
