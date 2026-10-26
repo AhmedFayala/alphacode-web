@@ -1,0 +1,7 @@
+*.log
+node_modules/
+__pycache__/
+venv/
+.DS_Store
+*.token
+web_token

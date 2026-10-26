@@ -1,0 +1,41 @@
+[Unit]
+Description=AlphaCode Web Bridge (WebSocket to Unix Socket)
+After=alphacode-api-bridge.service
+Requires=alphacode-api-bridge.service
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+EnvironmentFile=-__WEBCONF__
+ExecStart=__VENV__/bin/python __WEB__/bridge.py
+WorkingDirectory=__WEB__
+Environment=ALPHACODE_NO_TELEMETRY=1
+Environment=ALPHACODE_RUNTIME_DIR=__HOME__/.alphacode
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=__HOME__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__HOME__/.alphacode
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=256
+TasksMax=64
+MemoryMax=256M
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

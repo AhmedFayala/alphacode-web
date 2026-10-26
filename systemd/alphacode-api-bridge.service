@@ -1,0 +1,39 @@
+[Unit]
+Description=AlphaCode Harness API Bridge
+After=alphacode-daemon.service
+Requires=alphacode-daemon.service
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+ExecStart=__HOME__/.local/bin/alphacode api-bridge
+WorkingDirectory=__HOME__/workspace
+Environment=ALPHACODE_NO_TELEMETRY=1
+Environment=ALPHACODE_RUNTIME_DIR=__HOME__/.alphacode
+Environment=PATH=__HOME__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__HOME__/.alphacode
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=256
+TasksMax=64
+MemoryMax=256M
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
