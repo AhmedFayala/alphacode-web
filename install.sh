@@ -1,34 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  deploy_alphacode.sh — portable, idempotent AlphaCode web-chat installer
+#  install.sh — AlphaCode Web: premier one-line installer
 #
-#  Installs AlphaCode + a hardened WebSocket web UI on any Ubuntu/Debian host.
-#  No domain and no Cloudflare account required.
+#    curl -fsSL https://raw.githubusercontent.com/AhmedFayala/alphacode-web/main/install.sh | bash
 #
-#  Usage:
-#    sudo bash deploy_alphacode.sh [OPTIONS]
-#
-#  Options:
-#    --mode <loopback|direct-ip|quick-tunnel>  Access mode          (default: loopback)
-#    --port <PORT>            Bridge TCP port                       (default: 8765)
-#    --version <vX.Y.Z>       AlphaCode version to install          (default: v1.0.89)
-#    --provider-name <NAME>   OpenAI-compatible profile name        (optional)
-#    --base-url <URL>         OpenAI-compatible base URL            (optional)
-#    --model <MODEL>          Model id for that profile             (optional)
-#    --api-key <KEY>          API key for that profile              (or env ALPHACODE_API_KEY)
-#    --force                  Reinstall the binary / overwrite configs
-#    --uninstall              Remove services, files and user
-#    -h|--help                Show this help
-#
-#  Modes:
-#    loopback      Bind 127.0.0.1. Pair with a reverse proxy or named tunnel.
-#    direct-ip     Bind 0.0.0.0 and open the port in UFW. Access over
-#                  http://<SERVER_IP>:<PORT>/?token=<TOKEN>  (plain HTTP!)
-#    quick-tunnel  Bind 127.0.0.1 and run a Cloudflare quick tunnel, giving an
-#                  instant https://*.trycloudflare.com URL with no account.
-#
-#  Idempotent: safe to re-run. The web token and existing provider keys are
-#  preserved unless --force is given.
+#  Modes: loopback | direct-ip | quick-tunnel (account-free HTTPS)
+#  Idempotent: re-runs converge; token, config and provider keys are preserved.
+#  Binary handling: adopt a healthy existing alphacode, else ingest the release
+#  archive directly with SHA-256 verification. No upstream scripts are piped.
 # ============================================================================
 set -Eeuo pipefail
 
@@ -43,7 +22,6 @@ CONFIG_DIR="${ALPHACODE_HOME}/.config/alphacode"
 CONFIG_TOML="${CONFIG_DIR}/config.toml"
 TOKEN_FILE="${RUNTIME_DIR}/web_token"
 WEB_CONF="/etc/alphacode-web.conf"
-PROVIDER_ENV="/etc/alphacode-provider.conf"
 HELPER="/usr/local/bin/alphacode-web"
 TUNNEL_HELPER="/usr/local/bin/alphacode-tunnel"
 VERIFY_HELPER="/usr/local/bin/alphacode-verify"
@@ -60,17 +38,141 @@ PROVIDER_NAME=""
 BASE_URL=""
 MODEL=""
 API_KEY="${ALPHACODE_API_KEY:-}"
+TUNNEL_URL=""
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 
-# ── Output helpers ──────────────────────────────────────────────────────────
-C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_GREEN=$'\033[32m'
-C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_BLUE=$'\033[34m'
-log()  { printf '%s\n' "${C_BLUE}==>${C_RESET} $*"; }
-ok()   { printf '%s\n' "${C_GREEN}  ✓${C_RESET} $*"; }
-warn() { printf '%s\n' "${C_YELLOW}  !${C_RESET} $*" >&2; }
-die()  { printf '%s\n' "${C_RED}  ✗ $*${C_RESET}" >&2; exit 1; }
+# ── UI engine: ANSI palette, progress bars, spinners, cards ─────────────────
+# Falls back to plain ASCII logging on non-TTY / NO_COLOR / dumb terminals.
+TTY=0
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then TTY=1; fi
+# Defaults first: every palette variable must exist even on non-TTY runs
+# (set -u makes an unset variable fatal — verified by the adoption test).
+R=""; B=""; DIM=""; CYAN=""; SLATE=""; GREEN=""; GRAY=""; RED=""; YEL=""; VIOLET=""
+# Box glyphs need a UTF-8 charset ($'\uXXXX' is locale-dependent and emits
+# literal text on locale-less systems — verified in minimal containers);
+# hard-coded \xNN byte escapes are locale-independent. Colors are charset-safe.
+UTF8=0
+if command -v locale >/dev/null 2>&1 && [[ "$(locale charmap 2>/dev/null)" == *UTF* ]]; then UTF8=1; fi
+if (( TTY )); then
+  R=$'\e[0m'; B=$'\e[1m'; DIM=$'\e[2m'
+  CYAN=$'\e[38;5;80m'; SLATE=$'\e[38;5;103m'; GREEN=$'\e[38;5;114m'
+  GRAY=$'\e[38;5;245m'; RED=$'\e[38;5;203m'; YEL=$'\e[38;5;179m'; VIOLET=$'\e[38;5;141m'
+fi
+if (( TTY && UTF8 )); then
+  TL=$'\xe2\x95\xad'; TR=$'\xe2\x95\xae'; BL=$'\xe2\x95\xb0'; BR=$'\xe2\x95\xbf'
+  HZ=$'\xe2\x94\x80'; VT=$'\xe2\x95\xa2'
+else
+  TL="+"; TR="+"; BL="+"; BR="+"; HZ="-"; VT="|"
+fi
 
-# Run a command as the unprivileged user. Prefer sudo, fall back to runuser
-# (util-linux) then su, so the installer also works on minimal images without sudo.
+log()  { printf '%b\n' "${CYAN}  ●${R} $*"; }
+ok()   { printf '%b\n' "${GREEN}  ✓${R} $*"; }
+warn() { printf '%b\n' "${YEL}  !${R} $*" >&2; }
+die()  { printf '%b\n' "${RED}  ✗ $*${R}" >&2; exit 1; }
+
+STEP_TOTAL=6; STEP_N=0
+step() {
+  STEP_N=$((STEP_N + 1))
+  printf '\n%b\n' "${VIOLET}  [${STEP_N}/${STEP_TOTAL}]${R} ${B}$1${R}"
+}
+
+# In-place block progress bar:  [████████░░░░░░] 68% label
+bar() { # $1 = pct, $2 = label
+  local pct="$1" label="$2" w=30 filled out="" i
+  if (( ! TTY )); then
+    printf '    [%3d%%] %s\n' "$pct" "$label"
+    return
+  fi
+  filled=$(( pct * w / 100 ))
+  for ((i = 0; i < w; i++)); do
+    if (( i < filled )); then out+="${CYAN}█${R}"; else out+="${GRAY}░${R}"; fi
+  done
+  printf '\r  %s %3d%% %s\e[K' "$out" "$pct" "$label"
+  (( pct >= 100 )) && printf '\n'
+  return 0
+}
+
+# Spinner for unbounded waits; ASCII frames render in any terminal.
+SPIN_PID=""
+spin_start() {
+  spin_stop
+  local label="$*"
+  if (( ! TTY )); then printf '    … %s\n' "$label"; return; fi
+  (
+    local i=0
+    local fr=( '|' '/' '-' '\' )
+    while :; do
+      printf '\r    %s%s%s %s\e[K' "$CYAN" "${fr[$((i % 4))]}" "$R" "$label"
+      sleep 0.12
+      i=$((i + 1))
+    done
+  ) &
+  SPIN_PID=$!
+}
+spin_stop() {
+  if [[ -n "${SPIN_PID:-}" ]]; then
+    kill "$SPIN_PID" 2>/dev/null || true
+    wait "$SPIN_PID" 2>/dev/null || true
+    SPIN_PID=""
+  fi
+  if (( TTY )); then printf '\r    \e[K\r'; fi
+  return 0
+}
+
+# Bordered card with fixed-width rows (values truncated to fit).
+card() { # card "TITLE" ; then card_line label value pairs ; card_close
+  printf '%b\n' "${SLATE}${TL}${HZ}${HZ}${HZ}${TR}${R}"
+  printf '%b\n' "${SLATE}${VT}${R} ${B}$1${R}"
+  printf '%b\n' "${SLATE}${VT}${R}"
+}
+card_line() { # $1 label, $2 value
+  local label="$1" val="$2" maxv=44
+  ((${#val} > maxv)) && val="${val:0:$((maxv - 1))}…"
+  printf '%b\n' "${SLATE}${VT}${R}  ${GRAY}$(printf '%-11s' "$label")${R}${val}"
+}
+card_close() {
+  printf '%b\n' "${SLATE}${BL}${HZ}${HZ}${HZ}${BR}${R}"
+}
+
+# Clickable terminal hyperlink (OSC 8); falls back to plain text.
+link() { # $1 url, $2 text
+  if (( TTY )); then
+    printf '\e]8;;%s\e\\%s%s\e]8;;\e\\\n' "$1" "$2" "$R"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
+# ── Fetch / privilege helpers ───────────────────────────────────────────────
+dl() { # $1 = url, $2 = destination
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --max-time 240 -o "$2" "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --tries=3 --timeout=90 -O "$2" "$1"
+  else
+    return 1
+  fi
+}
+
+# Download with a live size-based progress bar (curl backgrounded; wget plain).
+dlp() { # $1 url, $2 dest, $3 label
+  local url="$1" dest="$2" label="$3" expected=0 cur=0 pid
+  expected="$(curl -sIL --max-time 20 "$url" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:" {v=$2} END {print v+0}')"
+  if (( TTY && expected > 0 )) && command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 -o "$dest" "$url" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+      cur="$(stat -c%s "$dest" 2>/dev/null || echo 0)"
+      bar $(( cur * 100 / expected )) "$label"
+      sleep 0.15
+    done
+    wait "$pid" || { bar 0 "$label — failed"; printf '\n'; return 1; }
+    bar 100 "$label"
+    return 0
+  fi
+  dl "$url" "$dest"
+}
+
 as_user() {
   if command -v sudo >/dev/null 2>&1; then
     sudo -u "$ALPHACODE_USER" "$@"
@@ -93,24 +195,42 @@ as_user() {
   fi
 }
 
-# Fetch a URL with whatever downloader exists (curl preferred, wget fallback).
-dl() {  # $1 = url, $2 = destination
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 3 --max-time 240 -o "$2" "$1"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q --tries=3 --timeout=90 -O "$2" "$1"
-  else
-    return 1
+# ── cloudflared provisioning: standalone static binary from Cloudflare ──────
+ensure_cloudflared() {
+  if command -v cloudflared >/dev/null 2>&1; then
+    ok "cloudflared present ($(cloudflared --version 2>&1 | awk '{print $3}'))"
+    return 0
   fi
+  local carch tmp
+  case "$(uname -m)" in
+    x86_64|amd64)  carch="amd64" ;;
+    aarch64|arm64) carch="arm64" ;;
+    *) die "unsupported architecture for cloudflared: $(uname -m)" ;;
+  esac
+  log "cloudflared not found — provisioning standalone binary (${carch})"
+  tmp="$(mktemp /tmp/cloudflared.XXXXXX)"
+  dlp "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${carch}" \
+      "$tmp" "fetching cloudflared-linux-${carch}" \
+    || { rm -f "$tmp"; die "cloudflared download failed"; }
+  install -m 755 "$tmp" /usr/local/bin/cloudflared
+  rm -f "$tmp"
+  ok "cloudflared $(cloudflared --version 2>&1 | awk '{print $3}') installed to /usr/local/bin"
+}
+
+
+fetch_raw() { # $1 = path in repo, $2 = destination, $3 = octal mode
+  dl "https://raw.githubusercontent.com/${REPO_SLUG}/${REF}/$1" "$2" \
+    || die "download failed: $1 (ref ${REF}) — check --repo/--ref or network"
+  chmod "$3" "$2"
 }
 
 # ── Usage ───────────────────────────────────────────────────────────────────
 usage() {
   cat <<'USAGE'
-deploy_alphacode.sh — portable, idempotent AlphaCode web-chat installer
+install.sh — AlphaCode Web: premier one-line installer
 
 Usage:
-  sudo bash deploy_alphacode.sh [OPTIONS]
+  sudo bash install.sh [OPTIONS]
 
 Options:
   --mode <loopback|direct-ip|quick-tunnel>  Access mode            (default: loopback)
@@ -133,6 +253,7 @@ Modes:
                 http://<SERVER_IP>:<PORT>/?token=<TOKEN>
   quick-tunnel  Bind 127.0.0.1 and run a Cloudflare quick tunnel, giving an
                 instant https://*.trycloudflare.com URL with no account.
+                cloudflared is provisioned automatically if missing.
 
 Idempotent: safe to re-run. The web token and provider keys are preserved
 unless --force is given. Web files are fetched from the repository at --ref.
@@ -167,7 +288,27 @@ esac
 [[ "$PORT" =~ ^[0-9]+$ ]] || die "--port must be numeric"
 [[ "$(id -u)" -eq 0 ]] || die "run as root (sudo bash $0)"
 
-# ── --verify: end-to-end sanity check ──────────────────────────────────────
+# ── --uninstall ─────────────────────────────────────────────────────────────
+if [[ "$DO_UNINSTALL" == "yes" ]]; then
+  log "Uninstalling AlphaCode web deployment"
+  systemctl disable --now alphacode-web.service alphacode-api-bridge.service \
+      alphacode-daemon.service alphacode-tunnel.service 2>/dev/null || true
+  rm -f /etc/systemd/system/alphacode-web.service \
+        /etc/systemd/system/alphacode-api-bridge.service \
+        /etc/systemd/system/alphacode-daemon.service \
+        /etc/systemd/system/alphacode-tunnel.service \
+        "$WEB_CONF" "$HELPER" "$TUNNEL_HELPER" "$VERIFY_HELPER"
+  ufw delete allow "${PORT}/tcp" >/dev/null 2>&1 || true
+  systemctl daemon-reload
+  if id -u "$ALPHACODE_USER" >/dev/null 2>&1; then
+    userdel -r "$ALPHACODE_USER" 2>/dev/null || warn "could not remove user home"
+  fi
+  ok "uninstalled"
+  ok "left untouched: host binaries (/usr/local/bin, /usr/bin), apt packages, cloudflared"
+  exit 0
+fi
+
+# ── --verify: end-to-end sanity check ───────────────────────────────────────
 if [[ "$DO_VERIFY" == "yes" ]]; then
   fail=0
   echo "AlphaCode deployment verification"
@@ -182,7 +323,8 @@ if [[ "$DO_VERIFY" == "yes" ]]; then
   printf '  %-24s %s\n' "alphacode" "$BV"
   [[ "$BV" != "missing" ]] || fail=1
   echo "  --- bridge ---"
-  VPORT="$(grep -oP '^BRIDGE_PORT=\K.*' "$WEB_CONF" 2>/dev/null || echo "${PORT}")"
+  VPORT="$(sed -n 's/^BRIDGE_PORT=//p' "$WEB_CONF" 2>/dev/null | head -1)"
+  VPORT="${VPORT:-$PORT}"
   VCODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${VPORT}/healthz" 2>/dev/null || echo 000)"
   printf '  %-24s %s\n' "/healthz" "$VCODE"
   [[ "$VCODE" == "200" ]] || fail=1
@@ -205,84 +347,33 @@ if [[ "$DO_VERIFY" == "yes" ]]; then
   exit 1
 fi
 
-# ── Uninstall ───────────────────────────────────────────────────────────────
-if [[ "$DO_UNINSTALL" == "yes" ]]; then
-  log "Uninstalling AlphaCode web deployment"
-  systemctl disable --now alphacode-web.service alphacode-api-bridge.service \
-      alphacode-daemon.service alphacode-tunnel.service 2>/dev/null || true
-  rm -f /etc/systemd/system/alphacode-web.service \
-        /etc/systemd/system/alphacode-api-bridge.service \
-        /etc/systemd/system/alphacode-daemon.service \
-        /etc/systemd/system/alphacode-tunnel.service \
-        "$WEB_CONF" "$PROVIDER_ENV" "$HELPER" "$TUNNEL_HELPER" "$VERIFY_HELPER"
-  ufw delete allow "${PORT}/tcp" >/dev/null 2>&1 || true
-  systemctl daemon-reload
-  if id -u "$ALPHACODE_USER" >/dev/null 2>&1; then
-    userdel -r "$ALPHACODE_USER" 2>/dev/null || warn "could not remove user home"
-  fi
-  ok "uninstalled"
-  ok "left untouched: host binaries (/usr/local/bin, /usr/bin), apt packages, cloudflared"
-  exit 0
-fi
-
-# ── Locate the running script (for the self-installed helper) ───────────────
-SELF="$(readlink -f "$0")"
-
-# ── 1. OS detection & dependencies ──────────────────────────────────────────
-log "Checking OS and installing dependencies"
-if ! command -v apt-get >/dev/null 2>&1; then
-  die "this installer targets Debian/Ubuntu (apt-get not found)"
-fi
-export DEBIAN_FRONTEND=noninteractive
-PKGS=(libxkbcommon0 python3 python3-venv curl tar xxd ca-certificates)
-MISSING=()
-for p in "${PKGS[@]}"; do
-  dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p")
-done
-if [[ ${#MISSING[@]} -gt 0 ]]; then
-  apt-get update -qq
-  apt-get install -y -qq "${MISSING[@]}" >/dev/null
-  ok "installed: ${MISSING[*]}"
-else
-  ok "all packages already present"
-fi
-
-if [[ "$MODE" == "quick-tunnel" ]] && ! command -v cloudflared >/dev/null 2>&1; then
-  log "Installing cloudflared (for quick-tunnel mode)"
-  arch="$(dpkg --print-architecture)"
-  curl -fsSL -o /tmp/cloudflared.deb \
-    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}.deb"
-  dpkg -i /tmp/cloudflared.deb >/dev/null
-  rm -f /tmp/cloudflared.deb
-  ok "cloudflared $(cloudflared --version 2>/dev/null | awk '{print $3}')"
-fi
-
-# ── 2. Unprivileged user ────────────────────────────────────────────────────
-log "Provisioning unprivileged user '${ALPHACODE_USER}'"
-if id -u "$ALPHACODE_USER" >/dev/null 2>&1; then
-  ok "user already exists (uid $(id -u "$ALPHACODE_USER"))"
-else
-  useradd -r -m -d "$ALPHACODE_HOME" -s /bin/bash "$ALPHACODE_USER"
-  ok "created uid $(id -u "$ALPHACODE_USER")"
-fi
-
-install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" -m 700 "$RUNTIME_DIR"
-install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" -m 755 "$WEB_DIR" "$STATIC_DIR"
-install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" -m 755 "${ALPHACODE_HOME}/workspace"
-install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" -m 700 "$CONFIG_DIR"
-
-# ── 3. AlphaCode binary ─────────────────────────────────────────────────────
+# ── Binary detection helpers (pure, read-only; used by profiling + step 2) ──
 BIN="${ALPHACODE_HOME}/.local/bin/alphacode"
-log "Installing AlphaCode ${VERSION}"
-
-# A candidate is healthy iff it executes and reports a version.
 binary_healthy() {
   [[ -x "$1" ]] || return 1
   "$1" --version >/dev/null 2>&1 || return 1
   return 0
 }
-
-# Search PATH and standard locations for a system AlphaCode we can adopt.
+# Any healthy alphacode on the system, destination included.
+detect_any_binary() {
+  local cand invoker_home
+  invoker_home="$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6 || true)"
+  for cand in \
+      "${invoker_home:+${invoker_home}/.local/bin/alphacode}" \
+      "$BIN" \
+      /usr/local/bin/alphacode \
+      /usr/bin/alphacode \
+      /opt/alphacode/bin/alphacode \
+      "$(command -v alphacode 2>/dev/null || true)"; do
+    [[ -n "$cand" ]] || continue
+    if binary_healthy "$cand"; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+# Healthy system binary EXCLUDING the destination (an adoption candidate).
 find_existing_binary() {
   local cand invoker_home
   invoker_home="$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6 || true)"
@@ -291,8 +382,7 @@ find_existing_binary() {
       /usr/local/bin/alphacode \
       /usr/bin/alphacode \
       /opt/alphacode/bin/alphacode \
-      "${invoker_home:+${invoker_home}/.local/bin/alphacode}" \
-      "$BIN"; do
+      "${invoker_home:+${invoker_home}/.local/bin/alphacode}"; do
     [[ -n "$cand" && "$cand" != "$BIN" ]] || continue
     if binary_healthy "$cand"; then
       printf '%s\n' "$cand"
@@ -302,21 +392,89 @@ find_existing_binary() {
   return 1
 }
 
+# ════════════════════════════════════════════════════════════════════════════
+#  Banner
+# ════════════════════════════════════════════════════════════════════════════
+printf '\n'
+printf '%b\n' "${SLATE}${TL}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${TR}${R}"
+printf '%b\n' "${SLATE}${VT}${R}  ${B}${VIOLET}◈ AlphaCode Web${R} ${B}— installer${R}   ${GRAY}installer v1.0.2 · agent ${VERSION}${R}  ${SLATE}${VT}${R}"
+printf '%b\n' "${SLATE}${BL}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${HZ}${BR}${R}"
+
+# ════════════════════════════════════════════════════════════════════════════
+#  [1/6] System Profiling
+# ════════════════════════════════════════════════════════════════════════════
+step "System Profiling"
+
+HOSTN="$(hostname 2>/dev/null || echo '?')"
+OS_PRETTY="$(grep -m1 '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d'"' -f2)"
+OS_PRETTY="${OS_PRETTY:-unknown}"
+KERNEL="$(uname -r)"
+ARCH="$(uname -m)"
+CORES="$(nproc 2>/dev/null || echo '?')"
+MEM_TOTAL="$(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo 2>/dev/null || echo '?')"
+MEM_AVAIL="$(awk '/MemAvailable/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo 2>/dev/null || echo '?')"
+read -r DISK_TOTAL DISK_AVAIL <<<"$(df -Pk / 2>/dev/null | awk 'NR==2 {printf "%d %d", $2/1048576, $4/1048576}')"
+PY_VER="$(python3 --version 2>/dev/null | awk '{print $2}')"
+
+DETECT="not found — clean install"
+DETECT_SRC="$(detect_any_binary | head -1 || true)"
+if [[ -n "${DETECT_SRC:-}" ]]; then
+  DETECT="${DETECT_SRC} — will adopt ($("${DETECT_SRC}" --version 2>/dev/null | head -1))"
+fi
+
+card "System Profile"
+card_line "hostname"  "$HOSTN"
+card_line "os"        "$OS_PRETTY"
+card_line "kernel"    "$KERNEL"
+card_line "cpu"       "${ARCH} · ${CORES} cores"
+card_line "memory"    "${MEM_TOTAL:-?} total · ${MEM_AVAIL:-?} available"
+card_line "disk /"    "${DISK_AVAIL:-?} GiB free of ${DISK_TOTAL:-?} GiB"
+card_line "python"    "${PY_VER:-not present (installed in step 4)}"
+card_line "alphacode" "$DETECT"
+card_line "mode"      "$MODE · port ${PORT}"
+card_close
+
+# ════════════════════════════════════════════════════════════════════════════
+#  [2/6] Binary Resolution & Adoption
+# ════════════════════════════════════════════════════════════════════════════
+step "Binary Resolution & Adoption"
+
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+  spin_start "installing download tooling (curl)"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq >/dev/null 2>&1 || true
+  apt-get install -y -qq curl ca-certificates >/dev/null 2>&1 || die "could not install curl"
+  spin_stop
+fi
+spin_start "ensuring binary runtime dependencies"
+export DEBIAN_FRONTEND=noninteractive
+NEED=()
+for p in libxkbcommon0 tar xxd; do
+  dpkg -s "$p" >/dev/null 2>&1 || NEED+=("$p")
+done
+if [[ ${#NEED[@]} -gt 0 ]]; then
+  apt-get install -y -qq "${NEED[@]}" >/dev/null 2>&1 || die "apt install failed: ${NEED[*]}"
+  spin_stop
+  ok "installed: ${NEED[*]}"
+else
+  spin_stop
+  ok "runtime dependencies present"
+fi
+
+# Step 2 only RESOLVES the binary (as root — the runner user does not exist yet);
+# step 3 performs the owned installation into ~/.local/bin once the user exists.
+STAGE_SRC=""
+STAGE_TMP=""
 if [[ "$FORCE" == "no" ]] && binary_healthy "$BIN"; then
   ok "already at $("$BIN" --version 2>/dev/null || echo "$VERSION")"
 else
   ADOPT_SRC="$(find_existing_binary || true)"
   if [[ -n "$ADOPT_SRC" ]]; then
     # ── Adoption: reuse the healthy system binary; never re-download ──
-    install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" "$(dirname "$BIN")"
-    install -m 755 -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" "$ADOPT_SRC" "$BIN"
-    printf '%s\n' "$ADOPT_SRC" > "${RUNTIME_DIR}/.adopted_from" 2>/dev/null || true
-    chown "$ALPHACODE_USER:$ALPHACODE_USER" "${RUNTIME_DIR}/.adopted_from" 2>/dev/null || true
-    ok "Detected existing working AlphaCode: ${ADOPT_SRC}"
-    ok "adopted -> ${BIN} ($("$BIN" --version 2>/dev/null || echo "?"))"
+    STAGE_SRC="$ADOPT_SRC"
+    ok "Detected existing working AlphaCode: ${ADOPT_SRC} (adopting in step 3)"
   else
     # ── Direct archive ingestion: release tarball + SHA-256, no upstream pipe ──
-    install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" "$(dirname "$BIN")"
     case "$(uname -m)" in
       x86_64|amd64)  ASSET="alphacode-linux-x86_64.tar.gz" ;;
       aarch64|arm64) ASSET="alphacode-linux-arm64.tar.gz" ;;
@@ -324,8 +482,8 @@ else
     esac
     REL_URL="https://github.com/dragonked2/alphacode/releases/download/${VERSION}"
     TMPD="$(mktemp -d /tmp/alphacode-dl.XXXXXX)"
-    log "Downloading ${ASSET} (${VERSION})"
-    dl "${REL_URL}/${ASSET}"   "${TMPD}/${ASSET}"   || { rm -rf "$TMPD"; die "release archive download failed"; }
+    dlp "${REL_URL}/${ASSET}" "${TMPD}/${ASSET}" "fetching ${ASSET}" \
+      || { rm -rf "$TMPD"; die "release archive download failed"; }
     dl "${REL_URL}/SHA256SUMS" "${TMPD}/SHA256SUMS" || { rm -rf "$TMPD"; die "checksum list download failed"; }
     EXPECTED="$(grep -E "[[:space:]]${ASSET}\$" "${TMPD}/SHA256SUMS" | awk '{print $1}' | head -1)"
     [[ -n "$EXPECTED" ]] || { rm -rf "$TMPD"; die "no checksum entry for ${ASSET} in SHA256SUMS"; }
@@ -335,19 +493,53 @@ else
     tar -xzf "${TMPD}/${ASSET}" -C "$TMPD"
     NEWBIN="$(find "$TMPD" -maxdepth 3 -type f -name alphacode | head -1)"
     [[ -n "$NEWBIN" ]] || { rm -rf "$TMPD"; die "archive did not contain an alphacode binary"; }
-    install -m 755 -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" "$NEWBIN" "$BIN"
-    rm -rf "$TMPD"
-    ok "installed ${VERSION} from release archive (no upstream scripts executed)"
+    STAGE_SRC="$NEWBIN"
+    STAGE_TMP="$TMPD"
+    ok "resolved ${VERSION} from release archive (no upstream scripts executed)"
   fi
 fi
 
+# ════════════════════════════════════════════════════════════════════════════
+#  [3/6] Sandboxed User & Security Boundary
+# ════════════════════════════════════════════════════════════════════════════
+step "Sandboxed User & Security Boundary"
+
+if id -u "$ALPHACODE_USER" >/dev/null 2>&1; then
+  ok "user ${ALPHACODE_USER} exists (uid $(id -u "$ALPHACODE_USER"), unprivileged)"
+else
+  useradd -r -m -d "$ALPHACODE_HOME" -s /bin/bash "$ALPHACODE_USER"
+  ok "created uid $(id -u "$ALPHACODE_USER") — no sudo, no root group"
+fi
+install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" -m 700 "$RUNTIME_DIR"
+install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" -m 755 "$WEB_DIR" "$STATIC_DIR"
+install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" -m 755 "${ALPHACODE_HOME}/workspace"
+install -d -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" -m 700 "$CONFIG_DIR"
+ok "home, runtime, config and workspace boundaries established"
+
+if [[ -n "${STAGE_SRC:-}" ]]; then
+  mkdir -p "$(dirname "$BIN")"
+  chown "$ALPHACODE_USER:$ALPHACODE_USER" "$(dirname "$BIN")"
+  install -m 755 -o "$ALPHACODE_USER" -g "$ALPHACODE_USER" "$STAGE_SRC" "$BIN"
+  if [[ -n "${STAGE_TMP:-}" ]]; then
+    rm -rf "$STAGE_TMP"
+    ok "installed ${VERSION} into ${BIN} (checksum-verified release archive)"
+  else
+    printf '%s\n' "$STAGE_SRC" > "${RUNTIME_DIR}/.adopted_from"
+    chown "$ALPHACODE_USER:$ALPHACODE_USER" "${RUNTIME_DIR}/.adopted_from"
+    ok "adopted -> ${BIN} (from $("$BIN" --version 2>/dev/null || echo "?"))"
+  fi
+fi
 binary_healthy "$BIN" || die "binary at $BIN is not healthy after install"
 ok "AlphaCode ready: $("$BIN" --version 2>/dev/null || echo "$VERSION")"
 
-# ── 4. Config (telemetry off) ───────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+#  [4/6] Web Bridge & Python Environment
+# ════════════════════════════════════════════════════════════════════════════
+step "Web Bridge & Python Environment"
+
 if [[ ! -f "$CONFIG_TOML" || "$FORCE" == "yes" ]]; then
   cat > "$CONFIG_TOML" <<'EOF'
-# AlphaCode configuration (managed by deploy_alphacode.sh)
+# AlphaCode configuration (managed by install.sh)
 telemetry = "nothing"
 reasoning_effort = "low"
 max_child_agents = 8
@@ -359,18 +551,9 @@ else
   ok "config preserved at $CONFIG_TOML"
 fi
 
-# ── 5. Web files ────────────────────────────────────────────────────────────
-log "Downloading web bridge and UI (repo: ${REPO_SLUG}, ref: ${REF})"
-fetch_raw() {  # $1 = path in repo, $2 = destination, $3 = octal mode
-  curl -fsSL --retry 3 --max-time 60 \
-    "https://raw.githubusercontent.com/${REPO_SLUG}/${REF}/$1" -o "$2" \
-    || die "download failed: $1 (ref ${REF}) — check --repo/--ref or network"
-  chmod "$3" "$2"
-}
+spin_start "fetching web bridge and UI (${REPO_SLUG}@${REF})"
 fetch_raw "src/bridge.py"        "${WEB_DIR}/bridge.py"        600
 fetch_raw "src/static/index.html" "${STATIC_DIR}/index.html"   644
-ok "bridge.py + index.html deployed"
-
 cat > "${WEB_DIR}/harness_probe.py" <<'PROBE_PY'
 #!/usr/bin/env python3
 """Minimal harness API handshake probe (used by alphacode-verify)."""
@@ -392,18 +575,28 @@ PROBE_PY
 chown -R "$ALPHACODE_USER:$ALPHACODE_USER" "$WEB_DIR"
 chmod 600 "${WEB_DIR}/bridge.py"
 chmod 644 "${STATIC_DIR}/index.html"
+spin_stop
+ok "bridge.py + index.html + probe deployed"
 
-# ── 6. Python venv with websockets ──────────────────────────────────────────
 if [[ ! -x "${VENV_DIR}/bin/python" || "$FORCE" == "yes" ]]; then
+  spin_start "creating python venv"
+  if ! command -v python3 >/dev/null 2>&1; then
+    apt-get install -y -qq python3 >/dev/null 2>&1 || die "python3 install failed"
+  fi
+  dpkg -s python3-venv >/dev/null 2>&1 || apt-get install -y -qq python3-venv >/dev/null 2>&1 \
+    || die "python3-venv install failed"
   as_user python3 -m venv "$VENV_DIR"
+  spin_stop
+  ok "venv created at ${VENV_DIR}"
 fi
+spin_start "installing websockets into venv"
 if ! "${VENV_DIR}/bin/python" -c 'import websockets' >/dev/null 2>&1; then
   as_user "${VENV_DIR}/bin/pip" install -q --upgrade pip >/dev/null
   as_user "${VENV_DIR}/bin/pip" install -q 'websockets>=14,<17'
 fi
+spin_stop
 ok "websockets $("${VENV_DIR}/bin/python" -c 'import websockets;print(websockets.__version__)')"
 
-# ── 7. Token (preserved across re-runs) ─────────────────────────────────────
 if [[ ! -s "$TOKEN_FILE" || "$FORCE" == "yes" ]]; then
   dd if=/dev/urandom bs=32 count=1 2>/dev/null | xxd -p -c 256 | tr -d '\n' > "$TOKEN_FILE"
   chown "$ALPHACODE_USER:$ALPHACODE_USER" "$TOKEN_FILE"
@@ -414,19 +607,16 @@ else
 fi
 TOKEN="$(cat "$TOKEN_FILE")"
 
-# ── 8. Bridge configuration ─────────────────────────────────────────────────
 if [[ "$MODE" == "direct-ip" ]]; then BIND="0.0.0.0"; else BIND="127.0.0.1"; fi
 cat > "$WEB_CONF" <<EOF
-# AlphaCode Web Bridge configuration (managed by deploy_alphacode.sh)
+# AlphaCode Web Bridge configuration (managed by install.sh)
 BRIDGE_HOST=${BIND}
 BRIDGE_PORT=${PORT}
 EOF
 chmod 644 "$WEB_CONF"
 ok "bridge config: BRIDGE_HOST=${BIND} BRIDGE_PORT=${PORT}"
 
-# ── 9. Optional provider profile ────────────────────────────────────────────
 if [[ -n "$BASE_URL" && -n "$MODEL" ]]; then
-  log "Configuring OpenAI-compatible provider"
   PNAME="${PROVIDER_NAME:-custom}"
   if [[ -z "$API_KEY" ]]; then
     warn "no API key supplied (--api-key or ALPHACODE_API_KEY); configuring without one"
@@ -448,8 +638,11 @@ if [[ -n "$BASE_URL" && -n "$MODEL" ]]; then
   fi
 fi
 
-# ── 10. systemd units ───────────────────────────────────────────────────────
-log "Installing systemd units"
+# ════════════════════════════════════════════════════════════════════════════
+#  [5/6] Systemd Service Orchestration
+# ════════════════════════════════════════════════════════════════════════════
+step "Systemd Service Orchestration"
+
 cat > /etc/systemd/system/alphacode-daemon.service <<'EOF'
 [Unit]
 Description=AlphaCode AI Agent Daemon
@@ -600,8 +793,11 @@ for unit in /etc/systemd/system/alphacode-daemon.service \
 done
 ok "units substituted and validated (no template placeholders, UMask=0077 present)"
 
-# Quick-tunnel unit (only in quick-tunnel mode; removed otherwise)
+CLOUDFLARED_BIN=""
 if [[ "$MODE" == "quick-tunnel" ]]; then
+  ensure_cloudflared
+  CLOUDFLARED_BIN="$(command -v cloudflared)"
+  [[ -n "$CLOUDFLARED_BIN" ]] || die "cloudflared resolved to an empty path"
   cat > /etc/systemd/system/alphacode-tunnel.service <<EOF
 [Unit]
 Description=AlphaCode Cloudflare Quick Tunnel
@@ -610,7 +806,7 @@ Requires=alphacode-web.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/cloudflared tunnel --config /dev/null --url http://127.0.0.1:${PORT} --no-autoupdate
+ExecStart=${CLOUDFLARED_BIN} tunnel --config /dev/null --url http://127.0.0.1:${PORT} --no-autoupdate
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -626,11 +822,9 @@ fi
 
 chmod 644 /etc/systemd/system/alphacode-*.service
 systemctl daemon-reload
-ok "units installed"
+ok "daemon-reload complete"
 
-# ── 11. Enable and start ────────────────────────────────────────────────────
-log "Starting services"
-# enable + restart so a changed unit file actually takes effect on re-runs
+spin_start "starting service chain (daemon → api-bridge → web)"
 systemctl enable alphacode-daemon.service >/dev/null 2>&1
 systemctl restart alphacode-daemon.service
 sleep 3
@@ -640,41 +834,77 @@ sleep 2
 systemctl enable alphacode-web.service >/dev/null 2>&1
 systemctl restart alphacode-web.service
 sleep 2
-if [[ "$MODE" == "quick-tunnel" ]]; then
-  systemctl enable alphacode-tunnel.service >/dev/null 2>&1 || true
-  systemctl restart alphacode-tunnel.service >/dev/null 2>&1 || true
-  sleep 6
-fi
-
 FAILED=()
 for svc in alphacode-daemon alphacode-api-bridge alphacode-web; do
   systemctl is-active --quiet "$svc.service" || FAILED+=("$svc")
 done
+spin_stop
 [[ ${#FAILED[@]} -eq 0 ]] || die "services not running: ${FAILED[*]}
   check: journalctl -u ${FAILED[0]} -n 50"
 ok "all three services active"
 
-# ── 12. Firewall for direct-ip ──────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+#  [6/6] Ingress & In-flight Tunnel Verification
+# ════════════════════════════════════════════════════════════════════════════
+step "Ingress & In-flight Tunnel Verification"
+
 if [[ "$MODE" == "direct-ip" ]] && command -v ufw >/dev/null 2>&1; then
   ufw allow "${PORT}/tcp" comment 'alphacode-web' >/dev/null 2>&1 || true
   ok "ufw: allowed ${PORT}/tcp"
 fi
 
-# ── 13. Helper commands ─────────────────────────────────────────────────────
+if [[ "$MODE" == "quick-tunnel" ]]; then
+  systemctl enable alphacode-tunnel.service >/dev/null 2>&1 || true
+  systemctl restart alphacode-tunnel.service >/dev/null 2>&1 || true
+
+  # In-flight verification: poll the tunnel journal for the public URL (12 s max).
+  deadline=$(( $(date +%s) + 12 ))
+  if (( TTY )); then
+    printf '    '
+  else
+    printf '    … establishing quick tunnel\n'
+  fi
+  while :; do
+    TUNNEL_URL="$(journalctl -u alphacode-tunnel --no-pager -n 60 2>/dev/null \
+      | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1 || true)"
+    [[ -n "$TUNNEL_URL" ]] && break
+    elapsed=$(( 12 - (deadline - $(date +%s)) ))
+    if (( TTY )); then
+      printf '\r    %s⏳%s registering tunnel… %ds elapsed \e[K' "$YEL" "$R" "$elapsed"
+      (( $(date +%s) >= deadline )) && { printf '\n'; break; }
+      sleep 0.5
+    else
+      (( $(date +%s) >= deadline )) && break
+      sleep 0.5
+    fi
+  done
+  if [[ -n "$TUNNEL_URL" ]]; then
+    (( TTY )) && printf '\r    \e[K\r'
+    ok "tunnel live: ${TUNNEL_URL}"
+  else
+    (( TTY )) && printf '\r    \e[K\r'
+    warn "tunnel URL not observed within 12 s — it may still be registering"
+    warn "check: journalctl -u alphacode-tunnel -f   or: alphacode-tunnel"
+  fi
+fi
+
+# ── helper commands (sed-based config parsing: no PCRE escaping hazards) ────
 cat > "$HELPER" <<EOF
 #!/usr/bin/env bash
 # Print the AlphaCode web-chat access URL and service status.
 TOKEN="\$(cat ${TOKEN_FILE} 2>/dev/null)"
-PORT="\$(grep -oP '^BRIDGE_PORT=\\\\K.*' ${WEB_CONF} 2>/dev/null || echo ${PORT})"
-HOST="\$(grep -oP '^BRIDGE_HOST=\\\\K.*' ${WEB_CONF} 2>/dev/null || echo 127.0.0.1)"
+PORT="\$(sed -n 's/^BRIDGE_PORT=//p' ${WEB_CONF} 2>/dev/null | head -1)"
+PORT="\${PORT:-${PORT}}"
+HOST="\$(sed -n 's/^BRIDGE_HOST=//p' ${WEB_CONF} 2>/dev/null | head -1)"
+HOST="\${HOST:-127.0.0.1}"
 echo "AlphaCode web chat"
 echo "  services: \$(systemctl is-active alphacode-daemon alphacode-api-bridge alphacode-web | tr '\n' ' ')"
 if [[ "\$HOST" == "0.0.0.0" ]]; then
-  IP="\$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \\\\K[0-9.]+' | head -1)"
+  IP="\$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if(\$i=="src") print \$(i+1)}' | head -1)"
   echo "  direct:   http://\${IP:-<SERVER_IP>}:\${PORT}/?token=\${TOKEN}"
 else
   if [[ -f /etc/systemd/system/alphacode-tunnel.service ]]; then
-    QURL="\$(journalctl -u alphacode-tunnel --no-pager -n 300 2>/dev/null | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1)"
+    QURL="\$(journalctl -u alphacode-tunnel --no-pager -n 300 2>/dev/null | grep -oE 'https://[a-z0-9-]+[.]trycloudflare[.]com' | tail -1)"
     echo "  tunnel:   \${QURL:-<starting, retry in a few seconds>}/?token=\${TOKEN}"
   else
     echo "  local:    http://127.0.0.1:\${PORT}/?token=\${TOKEN}"
@@ -688,31 +918,32 @@ chmod 755 "$HELPER"
 if [[ "$MODE" == "quick-tunnel" ]]; then
   cat > "$TUNNEL_HELPER" <<'EOF'
 #!/usr/bin/env bash
-# Show / watch the current quick-tunnel public URL.
+# Show the current quick-tunnel public URL.
 journalctl -u alphacode-tunnel --no-pager -n 300 \
-  | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1
+  | grep -oE 'https://[a-z0-9-]+[.]trycloudflare[.]com' | tail -1
 EOF
   chmod 755 "$TUNNEL_HELPER"
 fi
 
-# Self-test: services, bridge HTTP, and a harness NDJSON handshake.
 cat > "$VERIFY_HELPER" <<EOF
 #!/usr/bin/env bash
+# AlphaCode end-to-end health check.
 set -uo pipefail
-PORT="\$(grep -oP '^BRIDGE_PORT=\\K.*' ${WEB_CONF} 2>/dev/null || echo ${PORT})"
+PORT="\$(sed -n 's/^BRIDGE_PORT=//p' ${WEB_CONF} 2>/dev/null | head -1)"
+PORT="\${PORT:-${PORT}}"
 fail=0
 
 echo "AlphaCode health check"
 echo "  --- services ---"
 for s in alphacode-daemon alphacode-api-bridge alphacode-web; do
   st="\$(systemctl is-active \$s.service 2>/dev/null || true)"
-  printf '  %-24s %s\\n' "\$s" "\$st"
+  printf '  %-24s %s\n' "\$s" "\$st"
   [[ "\$st" == "active" ]] || fail=1
 done
 
 echo "  --- bridge ---"
 code="\$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:\$PORT/healthz 2>/dev/null || echo 000)"
-printf '  %-24s %s\\n' "/healthz" "\$code"
+printf '  %-24s %s\n' "/healthz" "\$code"
 [[ "\$code" == "200" ]] || fail=1
 
 echo "  --- harness socket ---"
@@ -722,11 +953,11 @@ if [[ "\$(id -u)" -eq 0 ]]; then
   else
     RUN_AS="runuser -u ${ALPHACODE_USER} --"
   fi
-  hs="\$(\${RUN_AS} ${VENV_DIR}/bin/python ${WEB_DIR}/harness_probe.py 2>&1 | tail -1)"
+  hs="\$(\$RUN_AS ${VENV_DIR}/bin/python ${WEB_DIR}/harness_probe.py 2>&1 | tail -1)"
 else
   hs="\$(${VENV_DIR}/bin/python ${WEB_DIR}/harness_probe.py 2>&1 | tail -1)"
 fi
-printf '  %-24s %s\\n' "alphacode-api.sock" "\$hs"
+printf '  %-24s %s\n' "alphacode-api.sock" "\$hs"
 [[ "\$hs" == "hello_ok" ]] || fail=1
 
 echo
@@ -738,21 +969,42 @@ fi
 exit \$fail
 EOF
 chmod 755 "$VERIFY_HELPER"
+ok "helpers installed: alphacode-web · alphacode-verify · alphacode-tunnel"
 
 # Install a copy of this installer for re-use
 install -m 755 "$SELF" /usr/local/bin/deploy_alphacode.sh 2>/dev/null || true
 
-# ── 14. Summary ─────────────────────────────────────────────────────────────
-echo
-log "Deployment complete"
-echo "  mode:      ${MODE}"
-SVCS="alphacode-daemon, alphacode-api-bridge, alphacode-web"
-[[ "$MODE" == "quick-tunnel" ]] && SVCS="$SVCS, alphacode-tunnel"
-echo "  services:  $SVCS"
-echo "  token:     ${TOKEN}"
-echo
-sleep 2
-"$HELPER" || true
-echo
-echo "  Run 'alphacode-web' any time to print the access URL."
-echo "  Logs:  journalctl -u alphacode-web -f"
+# ════════════════════════════════════════════════════════════════════════════
+#  Grand Finale
+# ════════════════════════════════════════════════════════════════════════════
+SERVICES_LINE="$(systemctl is-active alphacode-daemon alphacode-api-bridge alphacode-web 2>/dev/null | tr '\n' ' ')"
+case "$MODE" in
+  quick-tunnel) MODE_DESC="cloudflare quick tunnel (account-free HTTPS)" ;;
+  direct-ip)    MODE_DESC="direct IP over HTTP (token-gated)" ;;
+  *)            MODE_DESC="loopback (pair with a reverse proxy or tunnel)" ;;
+esac
+
+if [[ -n "$TUNNEL_URL" ]]; then
+  URL="${TUNNEL_URL}/?token=${TOKEN}"
+elif [[ "$MODE" == "direct-ip" ]]; then
+  IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}' | head -1)"
+  URL="http://${IP:-<SERVER_IP>}:${PORT}/?token=${TOKEN}"
+else
+  URL="http://127.0.0.1:${PORT}/?token=${TOKEN}"
+fi
+
+printf '\n'
+card "✔  AlphaCode Web is live"
+card_line "services"  "${SERVICES_LINE:-active active active}"
+card_line "mode"      "$MODE_DESC"
+card_line "bridge"    "127.0.0.1:${PORT} · 0600 sockets (UMask 0077)"
+card_line "user"      "${ALPHACODE_USER} (unprivileged, sandboxed)"
+card_close
+printf '\n  %bOpen your workspace:%b\n\n' "$B" "$R"
+printf '  '; link "$URL" "$URL"
+printf '\n  %bmanage:%b    alphacode-web      print this summary\n' "$GRAY" "$R"
+printf '  %b            alphacode-verify   health check\n' "$GRAY"
+if [[ "$MODE" == "quick-tunnel" ]]; then
+  printf '  %b            alphacode-tunnel   current tunnel URL\n' "$GRAY"
+fi
+printf '  %blogs:%b     journalctl -u alphacode-web -f\n\n' "$GRAY" "$R"

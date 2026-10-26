@@ -3,6 +3,38 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is SemVer.
 
+## [1.0.2] - 2026-10-26
+
+### Added
+- **Premier CLI installation experience** (pure Bash, zero external UI dependencies):
+  - System capability card before any mutation: hostname, OS, kernel, CPU/cores,
+    memory, root-disk free space, Python runtime, and existing-AlphaCode detection
+    (adoption candidate shown with its version).
+  - Six named phases (`[1/6] System Profiling` … `[6/6] Ingress & In-flight Tunnel
+    Verification`), a block-character progress bar with live byte-count percentage
+    for large downloads, ASCII spinner frames for unbounded waits, bordered summary
+    cards, and an OSC 8 clickable access URL in the finale.
+  - Graceful degradation: non-TTY, `NO_COLOR`, and `TERM=dumb` runs render plain
+    ASCII logging; box glyphs additionally require a UTF-8 charset (they use
+    hard-coded byte escapes — `$'\uXXXX'` is locale-dependent and emits literal
+    text on locale-less systems, which broke minimal containers).
+- **Automatic cloudflared provisioning**: when `--mode quick-tunnel` is active and
+  `cloudflared` is absent, the installer downloads the official standalone binary
+  for the detected architecture directly from Cloudflare's releases (with the
+  progress bar) and installs it to `/usr/local/bin/cloudflared`. The generated
+  systemd unit embeds the resolved binary path (previously hard-coded
+  `/usr/bin/cloudflared`, which broke self-provisioned installs).
+- **Live tunnel polling**: the installer waits up to 12 s for the quick tunnel to
+  register, showing elapsed time in place, and prints the resulting
+  `https://*.trycloudflare.com` URL directly in the finale when observed.
+
+### Fixed
+- Palette variables were unassigned on non-TTY runs after the charset refactor,
+  crashing piped installs with `SLATE: unbound variable` under `set -u`.
+- Step ordering dependency: the binary install referenced the runner user before
+  step 3 created it; binary resolution now stages as root and the owned
+  installation happens after user provisioning.
+
 ## [1.0.1] - 2026-10-26
 
 ### Fixed
