@@ -24,8 +24,10 @@ developer tool.
 |---|---|
 | 🧠 **Thinking mode** | Live reasoning stream with shimmer animation and elapsed timer, collapsing to `Thought process · 2.4s` when the answer starts |
 | 🎨 **Markdown + code** | Tables, lists, blockquotes, and fenced code with a lightweight syntax highlighter (bash / python / js / ts / rust / go / c / sql / json), language badge, macOS-style window controls, one-click copy |
-| 🔧 **Tool visibility** | Terminal-styled cards per tool call: live argument streaming, `running` / `done` / `error` badges, collapsible output |
+| 🔧 **Tool visibility** | Terminal-styled cards per tool call: live argument streaming, `running` / `done · Ns` / `error` badges with execution timing, collapsible output |
+| 🎛️ **Engine parity** | Click the model pill for a live switcher over the daemon's full model catalog (providers, availability, price hints); reasoning-effort selector; engine inspector with session state, token counters, provider profiles and tools-seen; session rename & archive from the UI |
 | ⌨️ **Slash palette** | Type `/` for fuzzy autocomplete over AlphaCode commands (`/swarm`, `/skills`, `/model`, …) |
+| 📊 **Token telemetry** | Live input/output/cache token counters fed by the daemon's token stream |
 | 📱 **Truly responsive** | Slide-out session drawer on phones, full sidebar on desktop, touch-friendly composer |
 | 🪶 **Zero dependencies** | One HTML file, no CDN, no build step, no framework — CSS-only animations that idle at 0% CPU |
 | 🔐 **Hardened by default** | 256-bit bearer token, `0600` Unix sockets, dedicated unprivileged user, systemd sandboxing (`NoNewPrivileges`, `ProtectSystem=strict`) |
@@ -111,7 +113,10 @@ Browser ──WSS──► Caddy / Cloudflare Tunnel ──► bridge.py ──N
                                                               swarm · MCP · providers
 ```
 
-- **`src/bridge.py`** — ~230 lines of Python asyncio. Authenticates the WebSocket upgrade,
+- **`src/bridge.py`** — Python asyncio. Authenticates the WebSocket upgrade, relays the
+  harness API, and adds an engine control plane: a second, session-following legacy-socket
+  connection exposing model catalog / model switching / reasoning effort / rename over
+  `engine_*` requests (no secrets ever leave the host).
   validates every frame as JSON, relays NDJSON line-by-line in both directions, serves the UI
   and an unauthenticated `/healthz`. Survives daemon restarts and client disconnects.
 - **`src/static/index.html`** — the entire frontend: streaming markdown renderer, syntax

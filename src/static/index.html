@@ -407,6 +407,58 @@ body::before {
   .jump { bottom:104px; }
 }
 @media (min-width:861px) { .backdrop { display:none; } }
+
+/* ── Engine parity: model switcher, effort menu, inspector ── */
+.pill.clickable { cursor:pointer; }
+.pill.clickable:hover { color:var(--fg); border-color:rgba(139,124,255,.45); }
+.ctx-tokens { font-size:10px; font-family:var(--mono); color:var(--fg-faint); white-space:nowrap; }
+.overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:60; display:none;
+  align-items:center; justify-content:center; backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
+.overlay.show { display:flex; animation:fade .18s ease both; }
+@keyframes fade { from { opacity:0; } }
+.sheet {
+  width:min(560px, 94vw); max-height:78vh; display:flex; flex-direction:column;
+  background:var(--bg-elev-solid); border:1px solid var(--border-strong);
+  border-radius:var(--r-lg); box-shadow:var(--shadow); overflow:hidden;
+  animation:rise .22s cubic-bezier(.2,.8,.2,1) both;
+}
+.sheet-head { display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid var(--border); }
+.sheet-title { font-size:14px; font-weight:650; }
+.sheet-sub { font-size:11px; color:var(--fg-faint); font-family:var(--mono); margin-top:2px; }
+.sheet-x { margin-left:auto; width:28px; height:28px; border-radius:8px; color:var(--fg-dim); display:grid; place-items:center; flex-shrink:0; }
+.sheet-x:hover { background:var(--bg-hover); color:var(--fg); }
+.sheet-search { margin:12px 16px 8px; padding:9px 12px; border-radius:var(--r-sm);
+  background:var(--bg-input); border:1px solid var(--border); color:var(--fg); font-size:13px; outline:none; width:calc(100% - 32px); }
+.sheet-search:focus { border-color:rgba(139,124,255,.5); }
+.sheet-body { flex:1; overflow-y:auto; padding:4px 8px 12px; }
+.sheet-body::-webkit-scrollbar { width:6px; }
+.sheet-body::-webkit-scrollbar-thumb { background:var(--border-strong); border-radius:3px; }
+.ms-group { font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--fg-faint); padding:10px 10px 5px; }
+.ms-item { display:flex; align-items:center; gap:10px; padding:8px 11px; border-radius:var(--r-sm); cursor:pointer; transition:background .1s; }
+.ms-item:hover { background:var(--bg-hover); }
+.ms-item.cur { background:var(--accent-soft); }
+.ms-item.dis { opacity:.45; cursor:default; }
+.ms-name { font-family:var(--mono); font-size:12.5px; color:var(--fg); word-break:break-all; }
+.ms-prov { font-size:10.5px; color:var(--fg-faint); }
+.ms-meta { margin-left:auto; text-align:right; font-size:10px; color:var(--fg-faint); font-family:var(--mono); flex-shrink:0; }
+.ms-item.cur .ms-meta { color:var(--accent); }
+.ms-empty { padding:26px; text-align:center; color:var(--fg-faint); font-size:12.5px; }
+.effmenu { position:fixed; z-index:55; min-width:180px;
+  background:var(--bg-elev-solid); border:1px solid var(--border-strong);
+  border-radius:var(--r-md); box-shadow:var(--shadow); padding:5px; display:none; }
+.effmenu.show { display:block; animation:rise .16s ease both; }
+.eff-item { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 12px; border-radius:var(--r-sm); cursor:pointer; font-size:12.5px; }
+.eff-item:hover { background:var(--bg-hover); }
+.eff-item.on { color:var(--accent); font-weight:600; }
+.ins-grid { display:grid; grid-template-columns:112px 1fr; gap:7px 12px; font-size:12.5px; padding:4px 12px; }
+.ins-k { color:var(--fg-faint); }
+.ins-v { font-family:var(--mono); font-size:11.5px; word-break:break-all; color:var(--fg-dim); }
+.ins-v b { color:var(--fg); font-weight:600; }
+.ins-sec { font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--fg-faint); padding:12px 14px 4px; }
+.t-dur { font-family:var(--mono); font-size:9.5px; color:var(--fg-faint); }
+.sb-ren { opacity:0; width:22px; height:22px; border-radius:6px; color:var(--fg-faint); font-size:11px; display:grid; place-items:center; flex-shrink:0; }
+.sb-item:hover .sb-ren { opacity:1; }
+.sb-ren:hover { background:var(--bg-active); color:var(--fg); }
 </style>
 </head>
 <body>
@@ -432,12 +484,15 @@ body::before {
     <header class="chat-head">
       <button class="hamburger" id="menuBtn">☰</button>
       <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">connecting</span></span>
-      <span class="pill model" id="modelPill"><span class="dot"></span><span id="modelText">—</span></span>
+      <span class="pill model clickable" id="modelPill" title="Switch model / provider"><span class="dot"></span><span id="modelText">—</span></span>
+      <span class="pill model clickable" id="effortPill" title="Reasoning effort"><span id="effortText">effort</span><span style="font-size:9px">▾</span></span>
       <div class="spacer"></div>
       <div class="ctx-wrap" id="ctxWrap" title="Context usage">
+        <span class="ctx-tokens" id="tokLabel" title="tokens"></span>
         <div class="ctx-track"><div class="ctx-fill" id="ctxFill"></div></div>
         <span class="ctx-label" id="ctxLabel">0%</span>
       </div>
+      <button class="icon-btn" id="inspBtn" title="Engine inspector">⌘</button>
       <button class="icon-btn" id="newBtnTop" title="New session"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-1px"><path d="M12 5v14M5 12h14"/></svg></button>
     </header>
 
@@ -471,6 +526,35 @@ body::before {
   </div>
 </div>
 
+<!-- ══ Model switcher ══ -->
+<div class="overlay" id="msOverlay">
+  <div class="sheet" role="dialog" aria-label="Model switcher">
+    <div class="sheet-head">
+      <div style="min-width:0">
+        <div class="sheet-title">Switch model</div>
+        <div class="sheet-sub" id="msCur">—</div>
+      </div>
+      <button class="sheet-x" id="msClose">✕</button>
+    </div>
+    <input class="sheet-search" id="msSearch" placeholder="Filter by model or provider..." autocomplete="off">
+    <div class="sheet-body" id="msList"></div>
+  </div>
+</div>
+
+<!-- ══ Engine inspector ══ -->
+<div class="overlay" id="insOverlay">
+  <div class="sheet" role="dialog" aria-label="Engine inspector">
+    <div class="sheet-head">
+      <div style="min-width:0">
+        <div class="sheet-title">Engine inspector</div>
+        <div class="sheet-sub" id="insSub">—</div>
+      </div>
+      <button class="sheet-x" id="insClose">✕</button>
+    </div>
+    <div class="sheet-body" id="insBody"></div>
+  </div>
+</div>
+
 <script>
 "use strict";
 /* ═══════════════════════════ State ═══════════════════════════ */
@@ -484,6 +568,13 @@ const LS_KEY = "alphacode:lastSession";
 const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 let pendingToolInputs = {};
+/* engine-parity state */
+let catalog = null;                  // last engine_catalog payload
+let engineProvider = null, engineModel = null, effort = null, harnessVersion = "";
+let tok = { input: 0, output: 0, cache: 0 };
+const toolsSeen = new Map();         // tool name -> {calls, lastMs, lastStatus}
+const pendingEngine = new Map();     // request id -> resolve fn
+const localTitles = new Map();       // session_id -> title (daemon list carries none)
 const $ = id => document.getElementById(id);
 const el = (t, c) => { const n = document.createElement(t); if (c) n.className = c; return n; };
 
@@ -760,7 +851,10 @@ function startTool(callId, name) {
     `<div class="t-body"><div class="t-sec">input</div><div class="t-args"></div><div class="t-sec">output</div><div class="t-out"></div></div>`;
   card.querySelector(".t-head").onclick = () => card.classList.toggle("open");
   host.appendChild(card);
-  curTool = { card, name, callId, args: "", out: "" };
+  curTool = { card, name, callId, args: "", out: "", t0: performance.now() };
+  const rec = toolsSeen.get(name) || { calls: 0 };
+  rec.calls++; rec.lastStatus = "running"; rec.lastMs = null;
+  toolsSeen.set(name, rec);
   toBottom();
 }
 function feedToolInput(text) {
@@ -773,13 +867,17 @@ function feedToolInput(text) {
 }
 function endTool(status, output) {
   if (!curTool) return;
-  const { card, name } = curTool;
+  const { card, name, t0 } = curTool;
+  const dur = t0 ? (performance.now() - t0) / 1000 : null;
+  const rec = toolsSeen.get(name);
+  if (rec) { rec.lastStatus = status; rec.lastMs = dur != null ? dur * 1000 : null; }
   card.classList.remove("running");
   if (status === "error") card.classList.add("error");
   else if (status === "ok") card.classList.add("ok");
   const badge = card.querySelector(".t-badge");
   badge.className = "t-badge " + status;
-  badge.innerHTML = status === "error" ? "✕ error" : status === "ok" ? "✓ done" : "· ended";
+  badge.innerHTML = (status === "error" ? "✕ error" : status === "ok" ? "✓ done" : "· ended")
+    + (dur != null ? ` <span class="t-dur">${dur.toFixed(1)}s</span>` : "");
   if (output !== undefined && output !== null && output !== "") {
     const o = card.querySelector(".t-out");
     o.textContent = String(output);
@@ -814,10 +912,11 @@ function renderSessions() {
   }
   sessions.forEach(s => {
     const it = el("div", "sb-item" + (s.session_id === sessionId ? " active" : ""));
-    const title = (s.title && s.title.trim()) || s.session_id.slice(0, 14) || "session";
-    it.innerHTML = `<span class="sb-dot"></span><span class="sb-name"></span><span class="sb-st">${escHtml(s.status || "")}</span>`;
+    const title = localTitles.get(s.session_id) || (s.title && s.title.trim()) || s.session_id.slice(0, 14) || "session";
+    it.innerHTML = `<span class="sb-dot"></span><span class="sb-name"></span><span class="sb-st">${escHtml(s.status || "")}</span><button class="sb-ren" title="Rename">✎</button>`;
     it.querySelector(".sb-name").textContent = title;
     it.onclick = () => { attach(s.session_id); closeDrawer(); };
+    it.querySelector(".sb-ren").onclick = e => { e.stopPropagation(); renameSession(title.replace(/^archived · /, "")); };
     list.appendChild(it);
   });
 }
@@ -849,6 +948,220 @@ function setContext(frac) {
   $("ctxLabel").textContent = pct + "%";
 }
 
+/* ═══════════════════════════ Engine control plane ═══════════════════════════ */
+const fmtTok = n => { n = Number(n) || 0; return n >= 1e6 ? (n/1e6).toFixed(1) + "M" : n >= 1e3 ? (n/1e3).toFixed(1) + "k" : String(n); };
+function renderTok() {
+  const total = (tok.input || 0) + (tok.output || 0) + (tok.cache || 0);
+  $("tokLabel").textContent = total ? `${fmtTok(tok.input || 0)}↑ ${fmtTok((tok.output || 0) + (tok.cache || 0))}↓` : "";
+  $("tokLabel").title = `tokens · in ${tok.input || 0} · out ${tok.output || 0} · cache ${tok.cache || 0}`;
+}
+function sendEngine(req, extra) {
+  return new Promise(resolve => {
+    const id = nextId++;
+    pendingEngine.set(id, resolve);
+    send(Object.assign({ id, req, session_id: sessionId }, extra || {}));
+    setTimeout(() => { if (pendingEngine.has(id)) { pendingEngine.delete(id); resolve(null); } }, 20000);
+  });
+}
+
+/* ── reasoning-effort menu ── */
+const EFFORTS = ["none", "low", "medium", "high"];
+function renderEffortMenu() {
+  const m = $("effMenu");
+  m.innerHTML = "";
+  EFFORTS.forEach(e => {
+    const it = el("div", "eff-item" + (effort === e ? " on" : ""));
+    it.innerHTML = `<span>${e}</span>${effort === e ? "<span>✓</span>" : ""}`;
+    it.onclick = async () => {
+      m.classList.remove("show");
+      if (effort === e) return;
+      const r = await sendEngine("engine_set_effort", { effort: e });
+      if (r && r.ev === "engine_effort_changed") {
+        effort = r.effort; $("effortText").textContent = "effort · " + effort;
+      } else addSystem("effort change failed" + (r && r.message ? ": " + r.message : ""));
+    };
+    m.appendChild(it);
+  });
+}
+$("effortPill").onclick = e => {
+  e.stopPropagation();
+  const m = $("effMenu");
+  if (m.classList.contains("show")) { m.classList.remove("show"); return; }
+  renderEffortMenu();
+  const r = $("effortPill").getBoundingClientRect();
+  m.style.left = Math.max(8, r.left - 10) + "px";
+  m.style.top = (r.bottom + 8) + "px";
+  m.classList.add("show");
+};
+document.addEventListener("click", e => {
+  const m = $("effMenu");
+  if (m.classList.contains("show") && !m.contains(e.target)) m.classList.remove("show");
+});
+
+/* ── model switcher ── */
+const fmtPrice = r => {
+  const c = r.cheapness || {};
+  if (c.monthly_price_micros && c.billing_kind === "subscription")
+    return "$" + (c.monthly_price_micros / 1e6).toFixed(0) + "/mo est";
+  if (c.estimated_reference_cost_micros)
+    return "$" + (c.estimated_reference_cost_micros / 1e6).toFixed(4) + "/ref";
+  return "";
+};
+function renderModelList(q) {
+  const box = $("msList");
+  if (!catalog || catalog.ev !== "engine_catalog") { box.innerHTML = `<div class="ms-empty">catalog unavailable</div>`; return; }
+  const needle = (q || "").toLowerCase();
+  const seen = new Set(); const avail = [], dis = [];
+  for (const r of (catalog.available_model_routes || [])) {
+    const key = r.model + "@" + (r.provider || "") + "@" + (r.api_method || "");
+    if (seen.has(key)) continue; seen.add(key);
+    if (needle && !(r.model.toLowerCase().includes(needle) || (r.provider || "").toLowerCase().includes(needle))) continue;
+    (r.available ? avail : dis).push(r);
+  }
+  const row = r => {
+    const cur = catalog.provider_model === r.model;
+    const it = el("div", "ms-item" + (cur ? " cur" : "") + (r.available ? "" : " dis"));
+    it.innerHTML = `<div style="min-width:0"><div class="ms-name"></div><div class="ms-prov"></div></div><div class="ms-meta"></div>`;
+    it.querySelector(".ms-name").textContent = r.model;
+    it.querySelector(".ms-prov").textContent = [r.provider, r.api_method].filter(Boolean).join(" · ");
+    it.querySelector(".ms-meta").textContent = (r.available ? fmtPrice(r) : (r.detail || "unavailable")) + (cur ? "  · active" : "");
+    if (r.available && !cur) it.onclick = async () => {
+      it.innerHTML = `<div class="ms-name" style="color:var(--accent)">switching…</div>`;
+      const resp = await sendEngine("engine_set_model", { model: r.model });
+      if (resp && resp.ev === "engine_model_changed") {
+        engineProvider = resp.provider; engineModel = resp.model;
+        if (catalog) { catalog.provider_name = resp.provider; catalog.provider_model = resp.model; }
+        setModel(engineProvider, engineModel);
+        closeMs();
+      } else {
+        addSystem("model switch failed" + (resp && resp.message ? ": " + resp.message : ""));
+        renderModelList($("msSearch").value);
+      }
+    };
+    return it;
+  };
+  box.innerHTML = "";
+  const sec = (title, list) => {
+    if (!list.length) return;
+    const g = el("div", "ms-group"); g.textContent = title; box.appendChild(g);
+    list.slice(0, 900).forEach(r => box.appendChild(row(r)));
+  };
+  sec("available", avail);
+  sec("needs credentials / unavailable", dis);
+  if (!avail.length && !dis.length) box.innerHTML = `<div class="ms-empty">no models match</div>`;
+  }
+
+  /* ── effort menu lives outside the header (fixed positioning) ── */
+  if (!document.getElementById("effMenu")) {
+  const em = el("div", "effmenu"); em.id = "effMenu"; document.body.appendChild(em);
+  }
+  async function openMs() {
+  $("msOverlay").classList.add("show");
+  $("msSearch").value = ""; $("msSearch").focus();
+  $("msCur").textContent = [engineProvider, engineModel].filter(Boolean).join(" · ") || "loading…";
+  renderModelList("");
+  catalog = await sendEngine("engine_catalog");
+  if (catalog && catalog.ev === "engine_catalog") {
+    if (catalog.provider_name) engineProvider = catalog.provider_name;
+    if (catalog.provider_model) engineModel = catalog.provider_model;
+    setModel(engineProvider, engineModel);
+    const nAvail = (catalog.available_model_routes || []).filter(r => r.available).length;
+    $("msCur").textContent = [engineProvider, engineModel].filter(Boolean).join(" · ") + `  ·  ${nAvail} available`;
+  } else {
+    $("msCur").textContent = "catalog unavailable" + (catalog && catalog.message ? " — " + catalog.message : "");
+  }
+  renderModelList("");
+}
+function closeMs() { $("msOverlay").classList.remove("show"); }
+$("modelPill").onclick = openMs;
+$("msClose").onclick = closeMs;
+$("msOverlay").addEventListener("click", e => { if (e.target === $("msOverlay")) closeMs(); });
+$("msSearch").addEventListener("input", () => renderModelList($("msSearch").value));
+
+/* ── engine inspector ── */
+function renameSession(current) {
+  const t = prompt("Session title:", current || "");
+  if (!t) return;
+  sendEngine("engine_rename", { title: t }).then(r => {
+    if (r && r.ev === "engine_renamed") {
+      if (r.session_id) localTitles.set(r.session_id, r.title);
+      renderSessions();
+      send({ id: nextId++, req: "list_sessions" });
+    }
+    else addSystem("rename failed" + (r && r.message ? ": " + r.message : ""));
+  });
+}
+async function openInspector() {
+  $("insOverlay").classList.add("show");
+  const body = $("insBody");
+  body.innerHTML = `<div class="ms-empty">reading engine state…</div>`;
+  $("insSub").textContent = [engineProvider, engineModel].filter(Boolean).join(" · ") || "—";
+  const [state, env] = await Promise.all([sendEngine("engine_state"), sendEngine("engine_env")]);
+  const cur = sessions.find(s => s.session_id === sessionId) || {};
+  const rows = pairs => pairs.map(([k, v]) => (v == null || v === "") ? "" :
+    `<div class="ins-k">${escHtml(k)}</div><div class="ins-v">${escHtml(String(v))}</div>`).join("");
+  let html = "";
+  html += `<div class="ins-sec">session</div><div class="ins-grid">` + rows([
+    ["id", sessionId],
+    ["title", cur.title || ""],
+    ["status", cur.status || "—"],
+    ["working dir", cur.working_dir || "—"],
+    ["transcript", cur.transcript_bytes != null ? (cur.transcript_bytes / 1024).toFixed(1) + " KiB" : "—"],
+    ["messages", state && state.ev === "engine_state" ? state.message_count : "—"],
+  ]) + `</div>`;
+  html += `<div class="ins-sec">engine</div><div class="ins-grid">` + rows([
+    ["provider", engineProvider || "—"],
+    ["model", engineModel || "—"],
+    ["effort", effort || (env && env.config && env.config.reasoning_effort) || "—"],
+    ["harness", harnessVersion || "—"],
+    ["tokens", `↑${fmtTok(tok.input)} ↓${fmtTok(tok.output)} · cache ${fmtTok(tok.cache)}`],
+    ["catalog", catalog && catalog.ev === "engine_catalog"
+      ? `${(catalog.available_model_routes || []).length} routes · ${(catalog.available_model_routes || []).filter(r => r.available).length} available`
+      : "not loaded"],
+  ]) + `</div>`;
+  if (env && env.ev === "engine_env") {
+    html += `<div class="ins-sec">environment</div><div class="ins-grid">` + rows([
+      ["workspace", env.workspace],
+      ["default model", (env.config || {}).default_model || "—"],
+      ["telemetry", (env.config || {}).telemetry || "—"],
+      ["max agents", (env.config || {}).max_child_agents || "—"],
+      ["provider profiles", (env.provider_profiles || []).join(", ") || "—"],
+      ["config sections", (env.provider_sections || []).join(", ") || "—"],
+    ]) + `</div>`;
+  }
+  const tools = [...toolsSeen.entries()];
+  html += `<div class="ins-sec">tools observed this session</div>`;
+  if (!tools.length) html += `<div class="ms-empty">no tool calls yet</div>`;
+  else html += `<div class="ins-grid">` + tools.map(([n, t]) =>
+    `<div class="ins-k">${escHtml(n)}</div><div class="ins-v">${t.calls} call${t.calls > 1 ? "s" : ""} · last ${t.lastStatus || "?"}${t.lastMs ? " · " + (t.lastMs / 1000).toFixed(1) + "s" : ""}</div>`).join("") + `</div>`;
+  html += `<div class="ins-sec">session actions</div>
+    <div style="display:flex; gap:8px; padding:6px 12px 16px; flex-wrap:wrap">
+      <button class="pbtn" id="insRename" style="border:1px solid var(--border-strong); color:var(--fg)">✎ Rename</button>
+      <button class="pbtn" id="insArchive" style="border:1px solid var(--border-strong); color:var(--fg)">📦 Archive</button>
+      <button class="pbtn" id="insModel" style="border:1px solid var(--border-strong); color:var(--fg)">⇄ Model</button>
+      <button class="pbtn" id="insFresh" style="border:1px solid var(--border-strong); color:var(--fg)">＋ New session</button>
+    </div>`;
+  body.innerHTML = html;
+  $("insRename").onclick = () => { closeIns(); renameSession(cur.title || ""); };
+  $("insArchive").onclick = async () => {
+    const base = (cur.title || "session").replace(/^archived · /, "");
+    const r = await sendEngine("engine_rename", { title: "archived · " + base });
+    if (r && r.ev === "engine_renamed") {
+      if (r.session_id) localTitles.set(r.session_id, r.title);
+      renderSessions();
+      send({ id: nextId++, req: "list_sessions" });
+      addSystem("session archived as: " + r.title);
+    } else addSystem("rename failed" + (r && r.message ? ": " + r.message : ""));
+    closeIns();
+  };
+  $("insFresh").onclick = () => { closeIns(); createSession(); };
+  $("insModel").onclick = () => { closeIns(); openMs(); };
+}
+function closeIns() { $("insOverlay").classList.remove("show"); }
+$("inspBtn").onclick = openInspector;
+$("insClose").onclick = closeIns;
+$("insOverlay").addEventListener("click", e => { if (e.target === $("insOverlay")) closeIns(); });
+
 /* ═══════════════════════════ Connection ═══════════════════════════ */
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 
@@ -870,6 +1183,7 @@ function handle(f) {
   const ev = f.ev || "";
   switch (ev) {
     case "hello_ok":
+      harnessVersion = f.server || harnessVersion;
       setStatus("on", "connected"); send({ id: nextId++, req: "list_sessions" });
       break;
     case "sessions":
@@ -942,7 +1256,17 @@ function handle(f) {
       addTurnSep();
       break;
     }
-    case "model_info": setModel(f.provider, f.model); break;
+    case "model_info":
+      if (f.provider) engineProvider = f.provider;
+      if (f.model) engineModel = f.model;
+      setModel(f.provider, f.model);
+      break;
+    case "session_renamed":
+      if (f.session_id && f.title) {
+        localTitles.set(f.session_id, f.title);
+        renderSessions();
+      }
+      break;
     case "message_accepted": break;
     case "reasoning_delta": feedThinking(f.text || ""); break;
     case "reasoning_done": stopThinking(true); break;
@@ -960,7 +1284,12 @@ function handle(f) {
     case "tool_progress": break;
     case "background_progress": break;
     case "memory_warning": setContext(f.usage); break;
-    case "token_usage": break;
+    case "token_usage":
+      if (f.input != null) tok.input = f.input;
+      if (f.output != null) tok.output = f.output;
+      if (f.cache_read_input != null) tok.cache = f.cache_read_input;
+      renderTok();
+      break;
     case "health_update": break;
     case "permission_request": addPermission(f); break;
     case "turn_done":
@@ -972,9 +1301,17 @@ function handle(f) {
       send({ id: nextId++, req: "list_sessions" });   // refresh titles/status
       break;
     case "error":
+      if (f.reply_to != null && pendingEngine.has(f.reply_to)) {
+        const r = pendingEngine.get(f.reply_to); pendingEngine.delete(f.reply_to); r(f);
+        break;
+      }
       if (pendingResumeId) { pendingResumeId = null; createSession(); break; }
       addSystem("error: " + (f.message || "unknown")); break;
-    default: break;
+    default:
+      if (f.reply_to != null && pendingEngine.has(f.reply_to)) {
+        const r = pendingEngine.get(f.reply_to); pendingEngine.delete(f.reply_to); r(f);
+      }
+      break;
   }
 }
 
